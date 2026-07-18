@@ -115,25 +115,12 @@ h1 {
   gap: 8px;
 }
 
-.segmented {
-  display: inline-grid;
-  grid-template-columns: 1fr 1fr;
-  border: 1px solid var(--line-strong);
-  background: #07090b;
-}
-
-.segmented button,
 .terminal-button {
   min-height: 34px;
   border: 0;
   color: var(--muted);
   background: transparent;
   padding: 0 12px;
-}
-
-.segmented button.active {
-  color: #06100c;
-  background: var(--green);
 }
 
 .terminal-button {
@@ -782,7 +769,6 @@ a {
   }
 
   .select-label,
-  .segmented,
   .terminal-button {
     flex: 1 1 130px;
   }

@@ -17,24 +17,10 @@
           </div>
         </div>
         <div class="control-row" aria-label="Terminal controls">
-          <div class="segmented" role="group" aria-label="Stream mode">
-            <button id="demoModeBtn" class="active" type="button">DEMO</button>
-            <button id="liveModeBtn" type="button">LIVE</button>
-          </div>
           <label class="select-label">
             <span>Fixture</span>
             <select id="fixtureSelect"></select>
           </label>
-          <label class="select-label">
-            <span>Speed</span>
-            <select id="speedSelect">
-              <option value="1">1x</option>
-              <option value="5" selected>5x</option>
-              <option value="10">10x</option>
-              <option value="20">20x</option>
-            </select>
-          </label>
-          <button id="replayBtn" class="terminal-button" type="button">Replay</button>
         </div>
       </header>
 
@@ -113,7 +99,7 @@
             autocomplete="off"
             spellcheck="false"
             aria-label="Command input"
-            placeholder="MATCH BRA-ARG | ODDS BRA-ARG | STEAM --live | PROOF BRA_ML | SETTLE BRA_ML"
+            placeholder="MATCH 18143850 | ODDS | STEAM --live | PROOF <MARKET_ID> | SETTLE <MARKET_ID>"
           >
         </form>
       </footer>
