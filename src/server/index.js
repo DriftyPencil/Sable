@@ -325,18 +325,42 @@ function normalizeTxlineScoreMessage(raw, message = {}) {
 }
 
 function extractOddsEntries(raw) {
-  if (Array.isArray(raw)) return raw;
+  if (Array.isArray(raw)) return raw.flatMap(expandTxlineOddsRow);
   if (!raw || typeof raw !== "object") return [];
-  for (const key of ["markets", "Markets", "odds", "Odds", "Prices", "prices", "data", "Data"]) {
+  for (const key of ["markets", "Markets", "odds", "Odds", "data", "Data"]) {
     const value = raw[key];
-    if (Array.isArray(value)) return value;
+    if (Array.isArray(value)) return value.flatMap((entry) => (
+      entry && typeof entry === "object" ? expandTxlineOddsRow(entry) : []
+    ));
   }
   if (
-    pickValue(raw, ["Decimal", "decimal", "DecimalOdds", "decimalOdds", "Price", "price", "Odds", "odds"]) !== undefined
+    pickValue(raw, ["Decimal", "decimal", "DecimalOdds", "decimalOdds", "Price", "price", "Odds", "odds", "Prices"]) !== undefined
   ) {
-    return [raw];
+    return expandTxlineOddsRow(raw);
   }
   return [];
+}
+
+function expandTxlineOddsRow(row) {
+  if (
+    row &&
+    typeof row === "object" &&
+    Array.isArray(row.Prices || row.prices) &&
+    Array.isArray(row.PriceNames || row.priceNames)
+  ) {
+    const prices = row.Prices || row.prices;
+    const names = row.PriceNames || row.priceNames;
+    const pct = row.Pct || row.pct || [];
+    return prices.map((price, index) => ({
+      ...row,
+      Id: `${row.MessageId || row.messageId || row.FixtureId || "market"}:${names[index] || index}`,
+      Selection: names[index] || `selection_${index + 1}`,
+      Decimal: Number(price) / 1000,
+      PctValue: pct[index]
+    }));
+  }
+
+  return [row];
 }
 
 function normalizeTxlineOddsEntry(entry, index, fixtureId) {
@@ -356,7 +380,9 @@ function normalizeTxlineOddsEntry(entry, index, fixtureId) {
     "participant",
     "Name",
     "name"
-  ], `${marketType} ${index + 1}`);
+  ], `${marketType} ${index + 1}`)
+    .replace("part1", "Participant 1")
+    .replace("part2", "Participant 2");
   const line = pickValue(entry, ["Line", "line", "Handicap", "handicap", "Total", "total"]);
   const id = pickString(entry, ["id", "Id", "MarketId", "marketId"], [
     fixtureId,

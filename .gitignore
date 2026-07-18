@@ -1,4 +1,11 @@
+.env
 .env.txline
 .env*.local
 *.json.key
-node_modules
+*-keypair.json
+devnet-wallet.json
+mainnet-wallet.json
+node_modules/
+.DS_Store
+npm-debug.log*
+devnet-wallet.json

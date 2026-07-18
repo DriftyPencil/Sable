@@ -37,9 +37,10 @@ Live path:
 
 ```txt
 Browser EventSource
-  -> GET /api/stream?channel=scores
+  -> GET /api/stream?channel=all
   -> Sable server adds private headers
-  -> TxODDS /api/scores/stream
+  -> TxODDS /api/scores/stream + /api/odds/stream
+  -> normalized match_event SSE messages
 ```
 
 Demo path:
@@ -52,6 +53,28 @@ Browser EventSource
 ```
 
 The UI consumes the same event shape for both paths.
+
+## Implemented Sable Proxy Routes
+
+```txt
+GET /api/txline/status
+  Returns selected network, API base, program ID, and whether credentials are present.
+
+GET /api/txline/fixtures
+  Proxies /api/fixtures/snapshot.
+
+GET /api/txline/odds/:fixtureId
+  Proxies /api/odds/snapshot/{fixtureId}.
+
+GET /api/txline/scores/:fixtureId
+  Proxies /api/scores/snapshot/{fixtureId}.
+
+GET /api/proofs/stat?source=txline&fixtureId=<id>&seq=<observed_seq>&statKeys=1,2
+  Proxies /api/scores/stat-validation.
+
+GET /api/stream?channel=all
+  Multiplexes scores and odds SSE streams into Sable's normalized event shape.
+```
 
 ## Settlement Strategy
 

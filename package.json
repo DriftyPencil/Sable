@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "node src/server/index.js",
     "start": "node src/server/index.js",
-    "check": "node --check src/server/index.js"
+    "check": "node --check src/server/index.js",
+    "txline:credentials": "tsx scripts/txline-setup/get-credentials.ts"
   },
   "engines": {
     "node": ">=20"

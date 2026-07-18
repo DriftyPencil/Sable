@@ -2,170 +2,269 @@ import * as anchor from "@coral-xyz/anchor";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
+  createAssociatedTokenAccountIdempotentInstruction,
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
-import { Connection, PublicKey, SystemProgram, Keypair } from "@solana/web3.js";
+import {
+  Connection,
+  Keypair,
+  LAMPORTS_PER_SOL,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+} from "@solana/web3.js";
 import axios from "axios";
+import fs from "node:fs";
+import path from "node:path";
 import nacl from "tweetnacl";
-import fs from "fs";
 
-// ─── CONFIG ────────────────────────────────────────────────────────────────
+const SCRIPT_DIR = __dirname;
+const REPO_ROOT = path.resolve(SCRIPT_DIR, "../..");
 
-const WALLET_PATH = "./devnet-wallet.json"; // ← change if yours is elsewhere
-const SERVICE_LEVEL_ID = 1;                 // Free World Cup tier
-const DURATION_WEEKS   = 4;
-const SELECTED_LEAGUES: number[] = [];      // Empty = standard free bundle
+const NETWORK = "devnet";
+const RPC_URL = process.env.SOLANA_RPC_URL || "https://api.devnet.solana.com";
+const API_ORIGIN = "https://txline-dev.txodds.com";
+const API_BASE_URL = `${API_ORIGIN}/api`;
+const PROGRAM_ID = new PublicKey("6pW64gN1s2uqjHkn1unFeEjAwJkPGHoppGvS715wyP2J");
+const TXL_TOKEN_MINT = new PublicKey("4Zao8ocPhmMgq7PdsYWyxvqySMGx7xb9cMftPMkEokRG");
+const SERVICE_LEVEL_ID = 1;
+const DURATION_WEEKS = 4;
+const SELECTED_LEAGUES: number[] = [];
+const WALLET_PATH = path.join(REPO_ROOT, "devnet-wallet.json");
 
-const CONFIG = {
-  rpcUrl:      "https://api.devnet.solana.com",
-  apiOrigin:   "https://txline-dev.txodds.com",
-  programId:   new PublicKey("6pW64gN1s2uqjHkn1unFeEjAwJkPGHoppGvS715wyP2J"),
-  txlTokenMint: new PublicKey("4Zao8ocPhmMgq7PdsYWyxvqySMGx7xb9cMftPMkEokRG"),
-};
+function maskSecret(value: string): string {
+  return `${value.slice(0, 12)}...${value.slice(-12)}`;
+}
 
-const apiBaseUrl = `${CONFIG.apiOrigin}/api`;
+function requireValue<T>(value: T | null | undefined, message: string): T {
+  if (value === null || value === undefined || value === "") throw new Error(message);
+  return value;
+}
 
-// ─── LOAD WALLET ───────────────────────────────────────────────────────────
+function loadOrCreateWallet(): Keypair {
+  if (fs.existsSync(WALLET_PATH)) {
+    const secretKey = JSON.parse(fs.readFileSync(WALLET_PATH, "utf8"));
+    return Keypair.fromSecretKey(Uint8Array.from(secretKey));
+  }
 
-const rawKey  = JSON.parse(fs.readFileSync(WALLET_PATH, "utf-8"));
-const keypair = Keypair.fromSecretKey(Uint8Array.from(rawKey));
-console.log("✅ Wallet loaded:", keypair.publicKey.toBase58());
+  const keypair = Keypair.generate();
+  fs.writeFileSync(WALLET_PATH, JSON.stringify(Array.from(keypair.secretKey), null, 2), {
+    mode: 0o600,
+  });
+  return keypair;
+}
 
-// ─── SETUP ANCHOR ──────────────────────────────────────────────────────────
+async function fundWallet(connection: Connection, publicKey: PublicKey) {
+  const balance = await connection.getBalance(publicKey, "confirmed");
+  if (balance >= 0.01 * LAMPORTS_PER_SOL) {
+    console.log(`Wallet SOL balance: ${(balance / LAMPORTS_PER_SOL).toFixed(3)}`);
+    return;
+  }
 
-const connection = new Connection(CONFIG.rpcUrl, "confirmed");
-const wallet     = new anchor.Wallet(keypair);
-const provider   = new anchor.AnchorProvider(connection, wallet, {
-  commitment: "confirmed",
-});
-anchor.setProvider(provider);
+  console.log("Requesting 0.1 devnet SOL for TxLINE subscription fees...");
+  try {
+    const signature = await connection.requestAirdrop(publicKey, 0.1 * LAMPORTS_PER_SOL);
+    const latestBlockhash = await connection.getLatestBlockhash("confirmed");
+    await connection.confirmTransaction({ signature, ...latestBlockhash }, "confirmed");
+    const nextBalance = await connection.getBalance(publicKey, "confirmed");
+    console.log(`Wallet SOL balance: ${(nextBalance / LAMPORTS_PER_SOL).toFixed(3)}`);
+  } catch (error) {
+    console.log("Devnet faucet airdrop failed.");
+    console.log(`Fund this devnet address, then rerun npm run txline:credentials: ${publicKey.toBase58()}`);
+    console.log("Faucet: https://faucet.solana.com");
+    throw error;
+  }
+}
 
-// ─── MAIN ──────────────────────────────────────────────────────────────────
+async function ensureUserTokenAccount(
+  connection: Connection,
+  payer: Keypair,
+  userTokenAccount: PublicKey
+) {
+  const existingAccount = await connection.getAccountInfo(userTokenAccount, "confirmed");
+  if (existingAccount) {
+    console.log(`TxL token account already exists: ${userTokenAccount.toBase58()}`);
+    return;
+  }
+
+  console.log("Creating required TxL Token-2022 associated token account...");
+  const transaction = new Transaction().add(
+    createAssociatedTokenAccountIdempotentInstruction(
+      payer.publicKey,
+      userTokenAccount,
+      payer.publicKey,
+      TXL_TOKEN_MINT,
+      TOKEN_2022_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    )
+  );
+  const signature = await connection.sendTransaction(transaction, [payer], {
+    skipPreflight: false,
+    preflightCommitment: "confirmed",
+  });
+  const latestBlockhash = await connection.getLatestBlockhash("confirmed");
+  await connection.confirmTransaction({ signature, ...latestBlockhash }, "confirmed");
+  console.log(`TxL token account created: ${signature}`);
+}
+
+function readLocalIdl(): anchor.Idl | undefined {
+  const candidatePaths = [
+    path.join(REPO_ROOT, "idl/txoracle.json"),
+    path.join(SCRIPT_DIR, "idl/txoracle.json"),
+  ];
+
+  for (const candidatePath of candidatePaths) {
+    if (!fs.existsSync(candidatePath)) continue;
+    const contents = fs.readFileSync(candidatePath, "utf8").trim();
+    if (!contents) continue;
+    const idl = JSON.parse(contents) as anchor.Idl;
+    if (Array.isArray(idl.instructions) && idl.instructions.length) {
+      console.log(`Loaded TxLINE IDL from ${candidatePath}`);
+      return idl;
+    }
+  }
+
+  return undefined;
+}
+
+async function loadTxlineIdl(provider: anchor.AnchorProvider): Promise<anchor.Idl> {
+  const localIdl = readLocalIdl();
+  if (localIdl) return localIdl;
+
+  console.log("Fetching TxLINE devnet IDL from chain...");
+  return requireValue(
+    await anchor.Program.fetchIdl(PROGRAM_ID, provider),
+    "Could not fetch TxLINE devnet IDL."
+  );
+}
+
+function upsertEnvFile(filePath: string, values: Record<string, string>) {
+  const existingLines = fs.existsSync(filePath)
+    ? fs.readFileSync(filePath, "utf8").split(/\r?\n/)
+    : [];
+  const seen = new Set<string>();
+  const updatedLines = existingLines.map((line) => {
+    const key = line.includes("=") ? line.slice(0, line.indexOf("=")).trim() : "";
+    if (!key || !(key in values)) return line;
+    seen.add(key);
+    return `${key}=${values[key]}`;
+  });
+
+  for (const [key, value] of Object.entries(values)) {
+    if (!seen.has(key)) updatedLines.push(`${key}=${value}`);
+  }
+
+  fs.writeFileSync(filePath, `${updatedLines.filter(Boolean).join("\n")}\n`, {
+    mode: 0o600,
+  });
+}
 
 async function main() {
+  const keypair = loadOrCreateWallet();
+  const connection = new Connection(RPC_URL, "confirmed");
+  const wallet = new anchor.Wallet(keypair);
+  const provider = new anchor.AnchorProvider(connection, wallet, {
+    commitment: "confirmed",
+  });
+  anchor.setProvider(provider);
 
-  // STEP A — Get Guest JWT
-  console.log("\n📡 Step 1: Fetching Guest JWT...");
-  const authRes = await axios.post(`${CONFIG.apiOrigin}/auth/guest/start`);
-  const jwt     = authRes.data.token;
-  console.log("✅ Guest JWT received:", jwt.slice(0, 40) + "...");
+  console.log(`Network: ${NETWORK}`);
+  console.log(`Wallet: ${wallet.publicKey.toBase58()}`);
+  console.log(`Wallet file: ${WALLET_PATH}`);
+  console.log(`Program: ${PROGRAM_ID.toBase58()}`);
+  console.log(`Service level: ${SERVICE_LEVEL_ID}`);
 
-  // STEP B — Derive PDAs
-  console.log("\n🔑 Step 2: Deriving on-chain accounts...");
+  await fundWallet(connection, wallet.publicKey);
+
+  console.log("Fetching guest JWT...");
+  const authResponse = await axios.post(`${API_ORIGIN}/auth/guest/start`);
+  const jwt = requireValue(authResponse.data.token as string | undefined, "Guest auth did not return a token.");
+  console.log(`Guest JWT: ${maskSecret(jwt)}`);
 
   const [tokenTreasuryPda] = PublicKey.findProgramAddressSync(
     [Buffer.from("token_treasury_v2")],
-    CONFIG.programId
+    PROGRAM_ID
   );
-
   const tokenTreasuryVault = getAssociatedTokenAddressSync(
-    CONFIG.txlTokenMint,
+    TXL_TOKEN_MINT,
     tokenTreasuryPda,
     true,
     TOKEN_2022_PROGRAM_ID,
     ASSOCIATED_TOKEN_PROGRAM_ID
   );
-
   const [pricingMatrixPda] = PublicKey.findProgramAddressSync(
     [Buffer.from("pricing_matrix")],
-    CONFIG.programId
+    PROGRAM_ID
   );
-
   const userTokenAccount = getAssociatedTokenAddressSync(
-    CONFIG.txlTokenMint,
-    provider.wallet.publicKey,
+    TXL_TOKEN_MINT,
+    wallet.publicKey,
     false,
     TOKEN_2022_PROGRAM_ID,
     ASSOCIATED_TOKEN_PROGRAM_ID
   );
+  await ensureUserTokenAccount(connection, keypair, userTokenAccount);
 
-  console.log("  tokenTreasuryPda   :", tokenTreasuryPda.toBase58());
-  console.log("  pricingMatrixPda   :", pricingMatrixPda.toBase58());
-  console.log("  userTokenAccount   :", userTokenAccount.toBase58());
+  const idl = await loadTxlineIdl(provider);
+  const program = new anchor.Program(idl, provider);
 
-  // STEP C — Load IDL and subscribe on-chain
-  // NOTE: Download the devnet IDL from TxLINE docs and save as ./idl/txoracle.json
-  console.log("\n⛓️  Step 3: Submitting on-chain subscribe transaction...");
-
-  let txSig: string;
-
-  try {
-    const idlJson     = JSON.parse(fs.readFileSync("./idl/txoracle.json", "utf-8"));
-    const program     = new anchor.Program(idlJson, provider);
-
-    txSig = await program.methods
-      .subscribe(SERVICE_LEVEL_ID, DURATION_WEEKS)
-      .accounts({
-        user:                  provider.wallet.publicKey,
-        pricingMatrix:         pricingMatrixPda,
-        tokenMint:             CONFIG.txlTokenMint,
-        userTokenAccount,
-        tokenTreasuryVault,
-        tokenTreasuryPda,
-        tokenProgram:          TOKEN_2022_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram:         SystemProgram.programId,
-      })
-      .rpc();
-
-    console.log("✅ Subscribe tx confirmed:", txSig);
-
-  } catch (err: any) {
-    console.error("❌ Subscribe failed:", err.message);
-    console.log("\n💡 If IDL is missing, download it from:");
-    console.log("   https://txline-docs.txodds.com");
-    process.exit(1);
-  }
-
-  // STEP D — Sign activation message
-  console.log("\n✍️  Step 4: Signing activation message...");
+  console.log("Submitting TxLINE devnet free-tier subscription...");
+  const txSig = await program.methods
+    .subscribe(SERVICE_LEVEL_ID, DURATION_WEEKS)
+    .accounts({
+      user: wallet.publicKey,
+      pricingMatrix: pricingMatrixPda,
+      tokenMint: TXL_TOKEN_MINT,
+      userTokenAccount,
+      tokenTreasuryVault,
+      tokenTreasuryPda,
+      tokenProgram: TOKEN_2022_PROGRAM_ID,
+      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    })
+    .rpc();
+  console.log(`Subscribe transaction: ${txSig}`);
 
   const messageString = `${txSig}:${SELECTED_LEAGUES.join(",")}:${jwt}`;
-  // For empty leagues this produces:  txSig::jwt
-  const messageBytes  = new TextEncoder().encode(messageString);
-  const sigBytes      = nacl.sign.detached(messageBytes, keypair.secretKey);
-  const walletSig     = Buffer.from(sigBytes).toString("base64");
+  const signatureBytes = nacl.sign.detached(
+    new TextEncoder().encode(messageString),
+    keypair.secretKey
+  );
+  const walletSignature = Buffer.from(signatureBytes).toString("base64");
 
-  console.log("  Message signed:", messageString.slice(0, 60) + "...");
-
-  // STEP E — Activate API token
-  console.log("\n🚀 Step 5: Activating API token...");
-
-  const activationRes = await axios.post(
-    `${apiBaseUrl}/token/activate`,
+  console.log("Activating TxODDS API token...");
+  const activationResponse = await axios.post(
+    `${API_BASE_URL}/token/activate`,
     {
       txSig,
-      walletSignature: walletSig,
-      leagues:         SELECTED_LEAGUES,
+      walletSignature,
+      leagues: SELECTED_LEAGUES,
     },
     { headers: { Authorization: `Bearer ${jwt}` } }
   );
+  const apiToken = String(
+    requireValue(activationResponse.data.token || activationResponse.data, "Activation did not return an API token.")
+  );
+  console.log(`API token: ${maskSecret(apiToken)}`);
 
-  const apiToken = activationRes.data.token ?? activationRes.data;
-  console.log("✅ API Token received:", String(apiToken).slice(0, 40) + "...");
+  const envValues = {
+    TXLINE_NETWORK: NETWORK,
+    TXLINE_GUEST_JWT: jwt,
+    TXLINE_API_TOKEN: apiToken,
+    TXLINE_DEVNET_API_BASE: "https://txline-dev.txodds.com/api",
+    TXLINE_MAINNET_API_BASE: "https://txline.txodds.com/api",
+    SOLANA_RPC_URL: RPC_URL,
+  };
 
-  // STEP F — Print your .env block
-  console.log("\n");
-  console.log("═".repeat(60));
-  console.log("  ✅  COPY THESE INTO YOUR .env FILE");
-  console.log("═".repeat(60));
-  console.log(`TXLINE_GUEST_JWT=${jwt}`);
-  console.log(`TXLINE_API_TOKEN=${apiToken}`);
-  console.log(`TXLINE_NETWORK=devnet`);
-  console.log("═".repeat(60));
+  upsertEnvFile(path.join(REPO_ROOT, ".env"), envValues);
+  upsertEnvFile(path.join(REPO_ROOT, ".env.txline"), envValues);
 
-  // Also write to .env.txline automatically
-  const envContent = [
-    `TXLINE_GUEST_JWT=${jwt}`,
-    `TXLINE_API_TOKEN=${apiToken}`,
-    `TXLINE_NETWORK=devnet`,
-  ].join("\n");
-
-  fs.writeFileSync(".env.txline", envContent);
-  console.log("\n📄 Also saved to .env.txline automatically\n");
+  console.log("Credentials written to .env and .env.txline.");
+  console.log("Restart Sable and switch to LIVE mode.");
 }
 
-main().catch((err) => {
-  console.error("\n❌ Fatal error:", err.message ?? err);
+main().catch((error) => {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`Credential setup failed: ${message}`);
   process.exit(1);
 });

@@ -31,7 +31,17 @@ WATCH USA-ENG
 
 ## TxODDS Credentials
 
-Copy `.env.example` values into your environment when enabling live TxLINE proxying:
+Generate devnet TxODDS credentials with:
+
+```bash
+npm run txline:credentials
+```
+
+This creates or reuses a local gitignored `devnet-wallet.json`, subscribes to the TxLINE devnet free tier, activates the API token, and writes `.env`.
+
+If the Solana devnet faucet is rate-limited, fund the printed devnet address at [faucet.solana.com](https://faucet.solana.com), then rerun the same command.
+
+The resulting `.env` contains:
 
 ```txt
 TXLINE_NETWORK=devnet
@@ -40,6 +50,14 @@ TXLINE_API_TOKEN=<token from POST /api/token/activate>
 ```
 
 The browser never sees these credentials. The Node server attaches them to TxODDS requests.
+
+Check readiness:
+
+```bash
+curl http://localhost:3000/api/txline/status
+```
+
+See [Real TxODDS Data](docs/live-data.md) for the activation checklist.
 
 ## Current Build
 
@@ -55,4 +73,5 @@ The browser never sees these credentials. The Node server attaches them to TxODD
 
 - [Architecture](docs/architecture.md)
 - [TxODDS integration](docs/txodds-integration.md)
+- [Real TxODDS data](docs/live-data.md)
 - [Demo script](docs/demo-script.md)

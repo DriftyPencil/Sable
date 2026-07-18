@@ -196,7 +196,18 @@ async function setMode(mode) {
 
 function connectStream() {
   if (state.source) state.source.close();
-  applyFixture(getFixtureRecord());
+  if (state.mode === "demo") {
+    applyFixture(getFixtureRecord());
+  } else {
+    const record = getFixtureRecord();
+    if (record && (!state.match || state.match.fixtureId !== record.metadata.fixtureId)) {
+      applyFixture(record);
+    }
+    state.events = [];
+    state.alerts = [];
+    state.receipts = new Map();
+    state.settlement = null;
+  }
   state.connected = false;
   state.lastEventAt = null;
   renderAll();
@@ -418,25 +429,35 @@ async function hydrateLiveFixtures() {
   }
 
   state.fixtures = fixtures;
-  state.fixtureKey = fixtures[0].id;
   els.fixtureSelect.innerHTML = fixtures.map((fixture) => (
     `<option value="${fixture.id}">${escapeHtml(fixture.metadata.label)}</option>`
   )).join("");
+
+  let selectedFixture = fixtures[0];
+  let selectedMarkets = [];
+  for (const fixture of fixtures.slice(0, 20)) {
+    selectedMarkets = await fetchLiveOddsMarkets(fixture);
+    if (selectedMarkets.length) {
+      selectedFixture = fixture;
+      break;
+    }
+  }
+
+  state.fixtureKey = selectedFixture.id;
   els.fixtureSelect.value = state.fixtureKey;
-  applyFixture(getFixtureRecord());
-  await hydrateLiveOdds(getFixtureRecord());
+  applyFixture(selectedFixture);
+  if (selectedMarkets.length) {
+    state.markets = new Map(selectedMarkets.map((market) => [market.id, market]));
+    state.selectedMarketId = selectedMarkets[0].id;
+    log("out", `Loaded real TxODDS odds for ${selectedFixture.metadata.label}.`);
+  } else {
+    log("out", "TxODDS fixtures loaded, but no odds markets were found in the first 20 fixtures.");
+  }
 }
 
 async function hydrateLiveOdds(record) {
   if (!record?.metadata?.fixtureId || state.mode !== "live" || !state.liveStatus?.liveReady) return;
-  const response = await fetch(`/api/txline/odds/${encodeURIComponent(record.metadata.fixtureId)}`);
-  if (!response.ok) {
-    log("out", `TxODDS odds snapshot failed with ${response.status}. Waiting for stream ticks.`);
-    return;
-  }
-
-  const rawOdds = await response.json();
-  const markets = normalizeOddsSnapshot(rawOdds, record.metadata.fixtureId);
+  const markets = await fetchLiveOddsMarkets(record);
   if (!markets.length) {
     log("out", `No odds markets returned for fixture ${record.metadata.fixtureId}.`);
     return;
@@ -444,6 +465,18 @@ async function hydrateLiveOdds(record) {
 
   state.markets = new Map(markets.map((market) => [market.id, market]));
   state.selectedMarketId = markets[0].id;
+}
+
+async function fetchLiveOddsMarkets(record) {
+  const response = await fetch(`/api/txline/odds/${encodeURIComponent(record.metadata.fixtureId)}`);
+  if (!response.ok) {
+    log("out", `TxODDS odds snapshot failed with ${response.status}. Waiting for stream ticks.`);
+    return [];
+  }
+
+  const rawOdds = await response.json();
+  const markets = normalizeOddsSnapshot(rawOdds, record.metadata.fixtureId);
+  return markets;
 }
 
 function normalizeLiveFixtures(rawFixtures) {
@@ -479,9 +512,11 @@ function normalizeOddsSnapshot(rawOdds, fixtureId) {
       Array.isArray(rawOdds?.[key]) ? rawOdds[key] : []
     ));
 
-  return rows.map((row, index) => {
+  return rows.flatMap(expandOddsRow).map((row, index) => {
     const marketType = String(row.SuperOddsType || row.superOddsType || row.MarketType || row.marketType || row.type || "market");
-    const selection = String(row.Selection || row.selection || row.Outcome || row.outcome || row.Name || row.name || `${marketType} ${index + 1}`);
+    const selection = String(row.Selection || row.selection || row.Outcome || row.outcome || row.Name || row.name || `${marketType} ${index + 1}`)
+      .replace("part1", "Participant 1")
+      .replace("part2", "Participant 2");
     const line = row.Line ?? row.line ?? row.Handicap ?? row.handicap ?? row.Total ?? row.total;
     const id = String(row.Id || row.id || row.MarketId || row.marketId || `${fixtureId}:${marketType}:${selection}:${line ?? ""}`)
       .replace(/[^a-z0-9:_-]/gi, "_");
@@ -505,6 +540,22 @@ function normalizeOddsSnapshot(rawOdds, fixtureId) {
       }
     };
   });
+}
+
+function expandOddsRow(row) {
+  const prices = row.Prices || row.prices;
+  const priceNames = row.PriceNames || row.priceNames;
+  const pctValues = row.Pct || row.pct || [];
+  if (Array.isArray(prices) && Array.isArray(priceNames)) {
+    return prices.map((price, index) => ({
+      ...row,
+      Id: `${row.MessageId || row.messageId || row.FixtureId || "market"}:${priceNames[index] || index}`,
+      Selection: priceNames[index] || `selection_${index + 1}`,
+      Decimal: Number(price) / 1000,
+      PctValue: pctValues[index]
+    }));
+  }
+  return [row];
 }
 
 function renderAll() {
