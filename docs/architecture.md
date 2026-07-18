@@ -17,10 +17,8 @@ TxLINE API
         v
 Sable Node Server
   /api/stream              live TxLINE SSE proxy
-  /api/sim/stream          replay fixture JSON as SSE
   /api/proofs/stat         receipt/proof fetch path
   /api/settlement/simulate devnet settlement simulation
-  /api/fixtures            available demo fixtures
         |
         | normalized Server-Sent Events
         v
@@ -62,12 +60,12 @@ Authorization: Bearer <guest_jwt>
 X-Api-Token: <activated_api_token>
 ```
 
-For live demos, `/api/stream?channel=scores` proxies TxLINE's scores SSE stream. For guaranteed hackathon judging, `/api/sim/stream` emits the same normalized event shape from committed fixtures.
+`/api/stream?channel=all&fixtureId=<id>` proxies TxLINE's scores and odds SSE streams, filtering events to the selected fixture before forwarding them to the browser.
 
 ## Verification Flow
 
 ```txt
-1. Receive or replay score event with real observed seq.
+1. Receive a TxODDS score event with real observed seq.
 2. Resolve market only on game_finalised/statusId=100/period=100.
 3. Request proof:
    GET /api/scores/stat-validation?fixtureId=<id>&seq=<seq>&statKeys=1,2
@@ -79,4 +77,4 @@ For live demos, `/api/stream?channel=scores` proxies TxLINE's scores SSE stream.
 7. Devnet escrow settlement can release SOL/USDC after validation passes.
 ```
 
-Current implementation uses simulated receipts for the demo fixtures and preserves the production fields required to swap in the real TxODDS proof response.
+Current implementation fetches TxODDS proof responses through `/api/proofs/stat` and displays the production fields returned by the provider.

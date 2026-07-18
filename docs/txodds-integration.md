@@ -31,28 +31,17 @@ Accept: text/event-stream
 Cache-Control: no-cache
 ```
 
-## Live/Demo Mode
+## Live Mode
 
 Live path:
 
 ```txt
 Browser EventSource
-  -> GET /api/stream?channel=all
+  -> GET /api/stream?channel=all&fixtureId=<selected_fixture_id>
   -> Sable server adds private headers
   -> TxODDS /api/scores/stream + /api/odds/stream
-  -> normalized match_event SSE messages
+  -> fixture-filtered normalized match_event SSE messages
 ```
-
-Demo path:
-
-```txt
-Browser EventSource
-  -> GET /api/sim/stream?fixture=bra-arg-final&speed=5
-  -> fixture JSON replay
-  -> normalized MatchEvent messages
-```
-
-The UI consumes the same event shape for both paths.
 
 ## Implemented Sable Proxy Routes
 
@@ -67,13 +56,13 @@ GET /api/txline/odds/:fixtureId
   Proxies /api/odds/snapshot/{fixtureId}.
 
 GET /api/txline/scores/:fixtureId
-  Proxies /api/scores/snapshot/{fixtureId}.
+  Checks /api/scores/snapshot/{fixtureId}, /api/scores/updates/{fixtureId}, and /api/scores/historical/{fixtureId}.
 
-GET /api/proofs/stat?source=txline&fixtureId=<id>&seq=<observed_seq>&statKeys=1,2
+GET /api/proofs/stat?fixtureId=<id>&seq=<observed_seq>&statKeys=1,2
   Proxies /api/scores/stat-validation.
 
-GET /api/stream?channel=all
-  Multiplexes scores and odds SSE streams into Sable's normalized event shape.
+GET /api/stream?channel=all&fixtureId=<selected_fixture_id>
+  Multiplexes scores and odds SSE streams into Sable's normalized event shape and filters by fixture.
 ```
 
 ## Settlement Strategy

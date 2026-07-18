@@ -1,7 +1,6 @@
 const state = {
-  mode: "demo",
-  speed: 5,
-  fixtureKey: "bra-arg-final",
+  mode: "live",
+  fixtureKey: "",
   fixtures: [],
   source: null,
   connected: false,
@@ -14,13 +13,14 @@ const state = {
   receipts: new Map(),
   selectedMarketId: null,
   liveStatus: null,
+  marketNotice: "",
   drawerOpen: false,
   activePane: "match",
   commandLog: [
-    { kind: "out", text: "Ready. Try MATCH BRA-ARG, ODDS BRA-ARG, STEAM --live, PROOF BRA_ML, SETTLE BRA_ML." }
+    { kind: "out", text: "Ready. Live TxODDS mode is active. Select a fixture, then use ODDS, STEAM, PROOF, or SETTLE." }
   ],
   settlement: null,
-  wallet: "DemoWallet9xSableDevnet111111111111111111111"
+  wallet: ""
 };
 
 const els = {};
@@ -56,6 +56,7 @@ function implied(decimal) {
 function clockLabel(clock) {
   if (!clock) return "--";
   const extra = clock.stoppage ? `+${clock.stoppage}` : "";
+  if (clock.period === "NS") return "NS";
   if (clock.period === "FT" || clock.period === "HT") return clock.period;
   return `${clock.minute}${extra}' ${clock.period}`;
 }
@@ -79,6 +80,37 @@ function getFixtureRecord(key = state.fixtureKey) {
   return state.fixtures.find((fixture) => fixture.id === key);
 }
 
+function activeFixtureId() {
+  return state.match?.fixtureId || getFixtureRecord()?.metadata?.fixtureId || "";
+}
+
+function scoreValue(score, side) {
+  const value = score?.[side];
+  return Number.isFinite(Number(value)) ? Number(value) : "--";
+}
+
+function fixtureStartLabel(startTime) {
+  const timestamp = Number(startTime);
+
+  if (!Number.isFinite(timestamp)) return "time TBA";
+
+  return new Date(timestamp).toLocaleString("en-GB", {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function fixtureOptionLabel(fixture) {
+  const sport = fixture.metadata.sport || "Soccer";
+  const label = fixture.metadata.label || "Fixture";
+  const start = fixtureStartLabel(fixture.metadata.startTime);
+  const fixtureId = fixture.metadata.fixtureId || "";
+
+  return `${sport} · ${label} · ${start} · #${fixtureId}`;
+}
+
 function setActivePane(pane) {
   state.activePane = pane;
   document.querySelectorAll(".pane").forEach((el) => {
@@ -89,10 +121,6 @@ function setActivePane(pane) {
 async function init() {
   els.statusBar = qs("#statusBar");
   els.fixtureSelect = qs("#fixtureSelect");
-  els.speedSelect = qs("#speedSelect");
-  els.demoModeBtn = qs("#demoModeBtn");
-  els.liveModeBtn = qs("#liveModeBtn");
-  els.replayBtn = qs("#replayBtn");
   els.matchTape = qs("#matchTape");
   els.matchTitle = qs("#matchTitle");
   els.matchDetail = qs("#matchDetail");
@@ -107,23 +135,17 @@ async function init() {
   els.receiptDrawer = qs("#receiptDrawer");
 
   bindEvents();
-  await loadDemoFixtures();
+  await hydrateLiveFixtures();
   connectStream();
   renderAll();
 }
 
 function bindEvents() {
-  els.demoModeBtn.addEventListener("click", () => setMode("demo"));
-  els.liveModeBtn.addEventListener("click", () => setMode("live"));
-  els.replayBtn.addEventListener("click", () => connectStream());
-  els.speedSelect.addEventListener("change", () => {
-    state.speed = Number(els.speedSelect.value);
-    connectStream();
-  });
   els.fixtureSelect.addEventListener("change", async () => {
     state.fixtureKey = els.fixtureSelect.value;
     applyFixture(getFixtureRecord());
-    if (state.mode === "live") await hydrateLiveOdds(getFixtureRecord());
+    await hydrateLiveScore(getFixtureRecord());
+    await hydrateLiveOdds(getFixtureRecord());
     connectStream();
   });
   els.commandForm.addEventListener("submit", (event) => {
@@ -154,24 +176,13 @@ function bindEvents() {
   });
 }
 
-async function loadDemoFixtures() {
-  const response = await fetch("/api/fixtures");
-  state.fixtures = await response.json();
-  els.fixtureSelect.innerHTML = state.fixtures.map((fixture) => (
-    `<option value="${fixture.id}">${escapeHtml(fixture.metadata.label)}</option>`
-  )).join("");
-  if (!getFixtureRecord()) state.fixtureKey = state.fixtures[0]?.id || "bra-arg-final";
-  els.fixtureSelect.value = state.fixtureKey;
-  applyFixture(getFixtureRecord());
-}
-
 function applyFixture(record) {
   if (!record) return;
   state.match = {
     ...record.metadata,
-    demoFixtureId: record.id,
-    score: { home: 0, away: 0 },
-    clock: { minute: 0, period: "NS" }
+    scoreStatus: record.metadata.scoreStatus || "unavailable",
+    score: record.metadata.score || undefined,
+    clock: record.metadata.clock || { minute: 0, period: "NS" }
   };
   state.markets = new Map(record.markets.map((market) => [market.id, { ...market }]));
   state.oddsHistory = new Map();
@@ -179,60 +190,37 @@ function applyFixture(record) {
   state.alerts = [];
   state.events = [];
   state.settlement = null;
+  state.marketNotice = "";
   state.selectedMarketId = record.markets[0]?.id || null;
-}
-
-async function setMode(mode) {
-  state.mode = mode;
-  els.demoModeBtn.classList.toggle("active", mode === "demo");
-  els.liveModeBtn.classList.toggle("active", mode === "live");
-  if (mode === "demo") {
-    await loadDemoFixtures();
-  } else {
-    await hydrateLiveFixtures();
-  }
-  connectStream();
 }
 
 function connectStream() {
   if (state.source) state.source.close();
-  if (state.mode === "demo") {
-    applyFixture(getFixtureRecord());
-  } else {
-    const record = getFixtureRecord();
-    if (record && (!state.match || state.match.fixtureId !== record.metadata.fixtureId)) {
-      applyFixture(record);
-    }
-    state.events = [];
-    state.alerts = [];
-    state.receipts = new Map();
-    state.settlement = null;
+  const record = getFixtureRecord();
+
+  if (record && (!state.match || state.match.fixtureId !== record.metadata.fixtureId)) {
+    applyFixture(record);
   }
+
+  state.events = [];
+  state.alerts = [];
+  state.receipts = new Map();
+  state.settlement = null;
   state.connected = false;
   state.lastEventAt = null;
   renderAll();
 
-  const url = state.mode === "demo"
-    ? `/api/sim/stream?fixture=${encodeURIComponent(state.fixtureKey)}&speed=${state.speed}`
-    : "/api/stream?channel=all";
+  const fixtureId = getFixtureRecord()?.metadata?.fixtureId || "";
+  const liveQuery = new URLSearchParams({ channel: "all" });
+  if (fixtureId) liveQuery.set("fixtureId", fixtureId);
 
-  const source = new EventSource(url);
+  const source = new EventSource(`/api/stream?${liveQuery.toString()}`);
   state.source = source;
 
   source.onopen = () => {
     state.connected = true;
     renderStatus();
   };
-
-  source.addEventListener("reset", (event) => {
-    const data = JSON.parse(event.data);
-    if (data.fixture) {
-      state.fixtureKey = data.fixture.id;
-      applyFixture(data.fixture);
-    }
-    state.connected = true;
-    renderAll();
-  });
 
   source.addEventListener("match_event", (event) => {
     reduceMatchEvent(JSON.parse(event.data));
@@ -246,13 +234,6 @@ function connectStream() {
       state.connected = false;
       source.close();
     }
-    renderAll();
-  });
-
-  source.addEventListener("replay_done", () => {
-    log("out", "Replay complete. Use Replay or WATCH USA-ENG to run another scenario.");
-    state.connected = false;
-    source.close();
     renderAll();
   });
 
@@ -273,6 +254,8 @@ function connectStream() {
 }
 
 function reduceRawLiveEvent(data) {
+  const homeScore = Number(data.HomeScore ?? data.homeScore);
+  const awayScore = Number(data.AwayScore ?? data.awayScore);
   const event = {
     id: `live:${data.Seq || data.seq || Date.now()}`,
     source: "txline-live",
@@ -282,10 +265,10 @@ function reduceRawLiveEvent(data) {
     ts: new Date().toISOString(),
     matchClock: { minute: Number(data.Minute || data.minute || 0), period: "H1" },
     teams: state.match?.teams || { home: "Home", away: "Away" },
-    score: {
-      home: Number(data.HomeScore || data.homeScore || 0),
-      away: Number(data.AwayScore || data.awayScore || 0)
-    },
+    scoreStatus: Number.isFinite(homeScore) && Number.isFinite(awayScore) ? "available" : "unavailable",
+    score: Number.isFinite(homeScore) && Number.isFinite(awayScore)
+      ? { home: homeScore, away: awayScore }
+      : undefined,
     payload: data
   };
   reduceMatchEvent(event);
@@ -295,6 +278,10 @@ function reduceMatchEvent(event) {
   state.lastEventAt = new Date();
   if (event.type === "heartbeat") {
     renderStatus();
+    return;
+  }
+
+  if (activeFixtureId() && event.fixtureId !== activeFixtureId()) {
     return;
   }
 
@@ -310,7 +297,8 @@ function reduceMatchEvent(event) {
         round: "Live feed",
         venue: "TxLINE",
         teams: event.teams,
-        score: event.score || { home: 0, away: 0 },
+        scoreStatus: event.scoreStatus || "unavailable",
+        score: event.score,
         clock: event.matchClock || { minute: 0, period: "NS" }
       };
     }
@@ -318,6 +306,7 @@ function reduceMatchEvent(event) {
 
   if (state.match) {
     if (event.teams?.home && event.teams.home !== "Participant 1") state.match.teams = event.teams;
+    state.match.scoreStatus = event.scoreStatus || state.match.scoreStatus;
     state.match.score = event.score || state.match.score;
     state.match.clock = event.matchClock || state.match.clock;
   }
@@ -430,41 +419,56 @@ async function hydrateLiveFixtures() {
 
   state.fixtures = fixtures;
   els.fixtureSelect.innerHTML = fixtures.map((fixture) => (
-    `<option value="${fixture.id}">${escapeHtml(fixture.metadata.label)}</option>`
+    `<option value="${fixture.id}">${escapeHtml(fixtureOptionLabel(fixture))}</option>`
   )).join("");
 
-  let selectedFixture = fixtures[0];
-  let selectedMarkets = [];
-  for (const fixture of fixtures.slice(0, 20)) {
-    selectedMarkets = await fetchLiveOddsMarkets(fixture);
-    if (selectedMarkets.length) {
-      selectedFixture = fixture;
-      break;
-    }
-  }
+  const selectedFixture = getFixtureRecord() || fixtures[0];
 
   state.fixtureKey = selectedFixture.id;
   els.fixtureSelect.value = state.fixtureKey;
   applyFixture(selectedFixture);
-  if (selectedMarkets.length) {
-    state.markets = new Map(selectedMarkets.map((market) => [market.id, market]));
-    state.selectedMarketId = selectedMarkets[0].id;
-    log("out", `Loaded real TxODDS odds for ${selectedFixture.metadata.label}.`);
-  } else {
-    log("out", "TxODDS fixtures loaded, but no odds markets were found in the first 20 fixtures.");
-  }
+  await hydrateLiveScore(selectedFixture);
+  await hydrateLiveOdds(selectedFixture);
 }
 
 async function hydrateLiveOdds(record) {
-  if (!record?.metadata?.fixtureId || state.mode !== "live" || !state.liveStatus?.liveReady) return;
+  if (!record?.metadata?.fixtureId || !state.liveStatus?.liveReady) return;
   const markets = await fetchLiveOddsMarkets(record);
   if (!markets.length) {
-    log("out", `No odds markets returned for fixture ${record.metadata.fixtureId}.`);
+    state.markets = new Map();
+    state.selectedMarketId = null;
+    state.marketNotice = `No TxODDS odds snapshot is available for ${record.metadata.label}.`;
+    log("out", `No TxODDS odds snapshot for ${record.metadata.label}.`);
     return;
   }
 
   state.markets = new Map(markets.map((market) => [market.id, market]));
   state.selectedMarketId = markets[0].id;
+  state.marketNotice = "";
+  log("out", `Loaded real TxODDS odds for ${record.metadata.label}.`);
+}
+
+async function hydrateLiveScore(record) {
+  if (!record?.metadata?.fixtureId || !state.liveStatus?.liveReady) return;
+  const response = await fetch(`/api/txline/scores/${encodeURIComponent(record.metadata.fixtureId)}`);
+
+  if (!response.ok) {
+    log("out", `TxODDS score lookup failed with ${response.status} for ${record.metadata.label}.`);
+    return;
+  }
+
+  const payload = await response.json();
+  const latestEvent = payload.latestEvent;
+
+  if (!state.match || state.match.fixtureId !== record.metadata.fixtureId) return;
+
+  state.match.scoreStatus = payload.scoreStatus || "unavailable";
+  if (latestEvent?.score) state.match.score = latestEvent.score;
+  if (latestEvent?.matchClock) state.match.clock = latestEvent.matchClock;
+
+  if (!latestEvent?.score) {
+    log("out", `No TxODDS score payload is available for ${record.metadata.label}.`);
+  }
 }
 
 async function fetchLiveOddsMarkets(record) {
@@ -481,28 +485,94 @@ async function fetchLiveOddsMarkets(record) {
 
 function normalizeLiveFixtures(rawFixtures) {
   const rows = Array.isArray(rawFixtures) ? rawFixtures : [];
-  return rows.slice(0, 80).map((fixture) => {
+  const fixturesById = new Map();
+  const nowMs = Date.now();
+  const liveGraceMs = 3 * 60 * 60 * 1000;
+
+  for (const fixture of rows.slice(0, 80)) {
     const fixtureId = String(fixture.FixtureId || fixture.fixtureId || fixture.Id || fixture.id || "");
     const participant1 = String(fixture.Participant1 || fixture.participant1 || fixture.HomeTeam || fixture.homeTeam || "Participant 1");
     const participant2 = String(fixture.Participant2 || fixture.participant2 || fixture.AwayTeam || fixture.awayTeam || "Participant 2");
     const p1Home = fixture.Participant1IsHome ?? fixture.participant1IsHome ?? true;
     const home = p1Home ? participant1 : participant2;
     const away = p1Home ? participant2 : participant1;
-    return {
+    const rawSport = String(fixture.SableSport || fixture.Sport || fixture.sport || "");
+    const sport = rawSport && rawSport !== "Sport" ? rawSport : sportName(fixture.SportId || fixture.sportId);
+    const latestScoreEvent = fixture.SableLatestScoreEvent || null;
+
+    if (!fixtureId || fixturesById.has(fixtureId)) continue;
+
+    fixturesById.set(fixtureId, {
       id: `txline-${fixtureId}`,
       source: "txline-live",
       metadata: {
         fixtureId,
         label: `${home} vs ${away}`,
+        sport,
         competition: String(fixture.CompetitionName || fixture.competitionName || fixture.Competition || "TxODDS fixture"),
-        round: String(fixture.FixtureGroup || fixture.fixtureGroup || fixture.Round || "Live fixture"),
+        round: String(fixture.FixtureGroup || fixture.fixtureGroup || fixture.Round || fixture.Competition || "Live fixture"),
         venue: String(fixture.Venue || fixture.venue || "TxLINE"),
         startTime: String(fixture.StartTime || fixture.startTime || new Date().toISOString()),
+        scoreStatus: latestScoreEvent?.score ? "available" : "unavailable",
+        score: latestScoreEvent?.score,
+        clock: latestScoreEvent?.matchClock,
         teams: { home, away }
       },
       markets: []
-    };
-  }).filter((fixture) => fixture.metadata.fixtureId);
+    });
+  }
+
+  return [...fixturesById.values()]
+    .filter((fixture) => {
+      const startMs = Number(fixture.metadata.startTime);
+      return Number.isFinite(startMs) && startMs >= nowMs - liveGraceMs;
+    })
+    .sort((a, b) => Number(a.metadata.startTime) - Number(b.metadata.startTime));
+}
+
+function sportName(sportId) {
+  switch (String(sportId || "")) {
+    case "1":
+      return "Soccer";
+    case "2":
+      return "Tennis";
+    case "3":
+      return "Basketball";
+    case "4":
+      return "American Football";
+    case "5":
+      return "Baseball";
+    case "6":
+      return "Ice Hockey";
+    default:
+      return "Soccer";
+  }
+}
+
+function marketLine(row) {
+  const directLine = row.Line ?? row.line ?? row.Handicap ?? row.handicap ?? row.Total ?? row.total;
+  const parameters = String(row.MarketParameters || row.marketParameters || "");
+  const lineMatch = parameters.match(/(?:^|;)line=([-+]?\d+(?:\.\d+)?)/);
+
+  if (directLine !== undefined && directLine !== null && directLine !== "") return Number(directLine);
+  return lineMatch ? Number(lineMatch[1]) : undefined;
+}
+
+function marketSelectionLabel(row, rawSelection, marketType, line) {
+  const selection = String(rawSelection)
+    .replace("part1", "Participant 1")
+    .replace("part2", "Participant 2");
+  const normalizedSelection = selection.toLowerCase();
+
+  if ((normalizedSelection === "over" || normalizedSelection === "under") && line !== undefined) {
+    return `${selection[0].toUpperCase()}${selection.slice(1)} ${line}`;
+  }
+
+  if (marketType.includes("ASIANHANDICAP") && line !== undefined && selection.startsWith("Participant")) {
+    return `${selection} ${line > 0 ? "+" : ""}${line}`;
+  }
+
+  return selection;
 }
 
 function normalizeOddsSnapshot(rawOdds, fixtureId) {
@@ -514,10 +584,9 @@ function normalizeOddsSnapshot(rawOdds, fixtureId) {
 
   return rows.flatMap(expandOddsRow).map((row, index) => {
     const marketType = String(row.SuperOddsType || row.superOddsType || row.MarketType || row.marketType || row.type || "market");
-    const selection = String(row.Selection || row.selection || row.Outcome || row.outcome || row.Name || row.name || `${marketType} ${index + 1}`)
-      .replace("part1", "Participant 1")
-      .replace("part2", "Participant 2");
-    const line = row.Line ?? row.line ?? row.Handicap ?? row.handicap ?? row.Total ?? row.total;
+    const rawSelection = row.Selection || row.selection || row.Outcome || row.outcome || row.Name || row.name || `${marketType} ${index + 1}`;
+    const line = marketLine(row);
+    const selection = marketSelectionLabel(row, rawSelection, marketType, line);
     const id = String(row.Id || row.id || row.MarketId || row.marketId || `${fixtureId}:${marketType}:${selection}:${line ?? ""}`)
       .replace(/[^a-z0-9:_-]/gi, "_");
     const decimal = Number(row.Decimal || row.decimal || row.DecimalOdds || row.decimalOdds || row.Price || row.price || row.Odds || row.odds || 0);
@@ -576,7 +645,7 @@ function renderStatus() {
   const connection = state.connected ? "CONNECTED" : "IDLE";
   const connectionClass = state.connected ? "status-good" : "status-warn";
   els.statusBar.innerHTML = [
-    ["MODE", state.mode.toUpperCase(), state.mode === "demo" ? "status-good" : "status-warn"],
+    ["MODE", "LIVE", "status-good"],
     ["STREAM", connection, connectionClass],
     ["FIXTURE", state.match?.label || "--", ""],
     ["CLOCK", clockLabel(state.match?.clock), ""],
@@ -624,7 +693,7 @@ function eventHeadline(event) {
   if (event.type === "market_resolved") {
     return `${event.payload.marketId} resolved to ${event.payload.resolvedOutcome}`;
   }
-  return event.payload.note || event.payload.action || "Status update";
+  return event.payload.note || event.payload.action || event.payload.Action || "Status update";
 }
 
 function renderMatchDetail() {
@@ -640,15 +709,15 @@ function renderMatchDetail() {
     <div class="scoreboard">
       <div>
         <div class="team-name">${escapeHtml(match.teams.home)}</div>
-        <div class="score">${match.score.home}</div>
+        <div class="score">${escapeHtml(scoreValue(match.score, "home"))}</div>
       </div>
       <div class="score-center">
         <div class="clock-big">${escapeHtml(clockLabel(match.clock))}</div>
-        <div class="round-label">${escapeHtml(match.round)}</div>
+        <div class="round-label">${escapeHtml(match.scoreStatus === "unavailable" ? "No TxODDS score payload" : match.round)}</div>
       </div>
       <div>
         <div class="team-name">${escapeHtml(match.teams.away)}</div>
-        <div class="score">${match.score.away}</div>
+        <div class="score">${escapeHtml(scoreValue(match.score, "away"))}</div>
       </div>
     </div>
     <div class="metric-grid">
@@ -659,9 +728,9 @@ function renderMatchDetail() {
     </div>
     <div class="metric-grid">
       <div class="metric"><span>Fixture ID</span><strong>${escapeHtml(match.fixtureId)}</strong></div>
-      <div class="metric"><span>Venue</span><strong>${escapeHtml(match.venue)}</strong></div>
+      <div class="metric"><span>Sport</span><strong>${escapeHtml(match.sport || "Sport")}</strong></div>
+      <div class="metric"><span>Competition</span><strong>${escapeHtml(match.competition)}</strong></div>
       <div class="metric"><span>Latest Seq</span><strong>${latestEvent?.seq || "--"}</strong></div>
-      <div class="metric"><span>Last Action</span><strong>${escapeHtml(latestEvent?.type || "pending")}</strong></div>
     </div>
   `;
 }
@@ -669,7 +738,7 @@ function renderMatchDetail() {
 function renderOdds() {
   const markets = [...state.markets.values()];
   if (!markets.length) {
-    els.oddsMonitor.innerHTML = `<div class="empty-state">No markets loaded.</div>`;
+    els.oddsMonitor.innerHTML = `<div class="empty-state">${escapeHtml(state.marketNotice || "No markets loaded.")}</div>`;
     return;
   }
 
@@ -718,7 +787,7 @@ function renderOdds() {
 
 function renderScanner() {
   if (!state.alerts.length) {
-    els.marketScanner.innerHTML = `<div class="empty-state">No steam moves yet. The scanner trips at 650 bps inside the replay window.</div>`;
+    els.marketScanner.innerHTML = `<div class="empty-state">No steam moves yet. The scanner trips at 650 bps on live odds displacement.</div>`;
     return;
   }
 
@@ -788,7 +857,7 @@ function renderSettlement() {
     <div class="settlement-row"><span>Selected</span><strong>${escapeHtml(market.id)}</strong></div>
     <div class="settlement-row"><span>Escrow asset</span><strong>Devnet USDC</strong></div>
     <div class="settlement-row"><span>Validation</span><strong class="${receipt ? "positive" : "muted"}">${receipt ? "TxLINE proof ready" : "Awaiting receipt"}</strong></div>
-    <div class="settlement-row"><span>Wallet</span><strong>${escapeHtml(short(state.wallet, 9))}</strong></div>
+    <div class="settlement-row"><span>Wallet</span><strong>${escapeHtml(state.wallet ? short(state.wallet, 9) : "Not connected")}</strong></div>
     ${settlement ? `
       <div class="settlement-row"><span>Status</span><strong class="positive">${escapeHtml(settlement.status)}</strong></div>
       <div class="settlement-row"><span>Tx</span><a href="${escapeHtml(settlement.explorerUrl)}" target="_blank" rel="noreferrer">${escapeHtml(short(settlement.txSignature, 8))}</a></div>
@@ -902,26 +971,21 @@ async function openReceipt(marketId = state.selectedMarketId) {
   }
   state.selectedMarketId = market.id;
   if (!state.receipts.has(market.id)) {
-    let response;
-    if (state.mode === "live") {
-      const seq = latestSequenceForMarket(market);
-      if (!seq) {
-        log("out", `TxODDS proof needs an observed stream/snapshot seq for fixture ${market.fixtureId}.`);
-        state.drawerOpen = true;
-        setActivePane("settlement");
-        renderAll();
-        return;
-      }
-      response = await fetch(`/api/proofs/stat?source=txline&fixtureId=${encodeURIComponent(market.fixtureId)}&seq=${encodeURIComponent(seq)}&statKeys=${encodeURIComponent((market.resolutionRule?.statKeys || [1, 2]).join(","))}`);
-    } else {
-      response = await fetch(`/api/proofs/stat?demoFixtureId=${encodeURIComponent(state.fixtureKey)}&marketId=${encodeURIComponent(market.id)}`);
+    const seq = latestSequenceForMarket(market);
+
+    if (!seq) {
+      log("out", `TxODDS proof needs an observed stream/snapshot seq for fixture ${market.fixtureId}.`);
+      state.drawerOpen = true;
+      setActivePane("settlement");
+      renderAll();
+      return;
     }
+
+    const response = await fetch(`/api/proofs/stat?fixtureId=${encodeURIComponent(market.fixtureId)}&seq=${encodeURIComponent(seq)}&statKeys=${encodeURIComponent((market.resolutionRule?.statKeys || [1, 2]).join(","))}`);
     if (response.ok) {
       const payload = await response.json();
-      state.receipts.set(market.id, state.mode === "live"
-        ? buildTxlineReceipt(payload, market)
-        : payload);
-    } else if (state.mode === "live") {
+      state.receipts.set(market.id, buildTxlineReceipt(payload, market));
+    } else {
       log("out", `TxODDS proof lookup failed with ${response.status}; need a final score seq for this fixture.`);
     }
   }
@@ -992,6 +1056,13 @@ async function settleMarket(marketId = state.selectedMarketId) {
     return;
   }
   state.selectedMarketId = market.id;
+  if (!state.wallet) {
+    log("out", "Connect a wallet before settlement.");
+    setActivePane("settlement");
+    renderAll();
+    return;
+  }
+
   await openReceipt(market.id);
   const receipt = state.receipts.get(market.id);
   if (!receipt) {

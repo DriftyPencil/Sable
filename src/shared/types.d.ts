@@ -1,4 +1,4 @@
-export type StreamSource = "txline-live" | "txline-historical" | "demo";
+export type StreamSource = "txline-live" | "txline-historical";
 
 export type MatchEventType =
   | "match_status"
@@ -14,7 +14,6 @@ export interface MatchEvent {
   id: string;
   source: StreamSource;
   fixtureId: string;
-  demoFixtureId?: string;
   seq: number;
   txlineEventName?: string;
   type: MatchEventType;
@@ -28,6 +27,7 @@ export interface MatchEvent {
     home: string;
     away: string;
   };
+  scoreStatus?: "available" | "unavailable";
   score?: {
     home: number;
     away: number;

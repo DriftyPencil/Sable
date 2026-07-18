@@ -16,17 +16,17 @@ Then open:
 http://localhost:3000
 ```
 
-No dependency install is required for the current demo build.
+No dependency install is required after the project dependencies are already present.
 
-## Demo Commands
+## Commands
 
 ```txt
-MATCH BRA-ARG
-ODDS BRA-ARG
+MATCH 18143850
+ODDS
 STEAM --live
-PROOF BRA_ML
-SETTLE BRA_ML
-WATCH USA-ENG
+PROOF <MARKET_ID>
+SETTLE <MARKET_ID>
+WATCH <FIXTURE_ID>
 ```
 
 ## TxODDS Credentials
@@ -61,7 +61,8 @@ See [Real TxODDS Data](docs/live-data.md) for the activation checklist.
 
 ## Current Build
 
-- Demo SSE fixture replay with `BRA vs ARG` and `USA vs ENG`
+- Live TxODDS fixture loading
+- Fixture-scoped TxODDS SSE proxying
 - Real-time match tape
 - Odds monitor with implied probabilities
 - Steam move detection
@@ -74,4 +75,3 @@ See [Real TxODDS Data](docs/live-data.md) for the activation checklist.
 - [Architecture](docs/architecture.md)
 - [TxODDS integration](docs/txodds-integration.md)
 - [Real TxODDS data](docs/live-data.md)
-- [Demo script](docs/demo-script.md)
