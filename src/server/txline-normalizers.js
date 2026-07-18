@@ -39,6 +39,36 @@ function normalizeParticipantName(value = "") {
     .replace("part2", "Participant 2");
 }
 
+function marketLineValue(entry = {}) {
+  const directLine = pickValue(entry, ["Line", "line", "Handicap", "handicap", "Total", "total"]);
+  const parameters = String(pickValue(entry, ["MarketParameters", "marketParameters"], ""));
+  const lineMatch = parameters.match(/(?:^|;)line=([-+]?\d+(?:\.\d+)?)/);
+
+  if (directLine !== undefined && directLine !== null && directLine !== "") {
+    return Number(directLine);
+  }
+
+  return lineMatch ? Number(lineMatch[1]) : undefined;
+}
+
+function stableOddsId({
+  fixtureId = "live",
+  bookmakerId = "",
+  marketType = "market",
+  marketPeriod = "",
+  line = undefined,
+  selection = ""
+} = {}) {
+  return [
+    fixtureId,
+    bookmakerId || "consensus",
+    marketType || "market",
+    marketPeriod || "full",
+    line === undefined ? "na" : line,
+    selection || "selection"
+  ].join(":").replace(/[^a-z0-9:_+.-]/gi, "_");
+}
+
 function getParticipantNames(payload = {}) {
   const participant1 = pickString(payload, [
     "Participant1",
@@ -324,7 +354,8 @@ function expandTxlineOddsRow(row = {}) {
   if (Array.isArray(prices) && Array.isArray(names)) {
     return prices.map((price, index) => ({
       ...row,
-      Id: `${row.MessageId || row.messageId || row.FixtureId || "market"}:${names[index] || index}`,
+      RawMessageId: row.MessageId || row.messageId || "",
+      PriceIndex: index,
       Selection: names[index] || `selection_${index + 1}`,
       Decimal: Number(price) / 1000,
       PctValue: pct[index]
@@ -365,6 +396,7 @@ function normalizeTxlineOddsEntry(entry = {}, index = 0, fixtureId = "live") {
     "marketType",
     "type"
   ], "market");
+  const marketPeriod = pickString(entry, ["MarketPeriod", "marketPeriod", "Period", "period"], "");
   const selection = normalizeParticipantName(pickString(entry, [
     "Selection",
     "selection",
@@ -375,13 +407,17 @@ function normalizeTxlineOddsEntry(entry = {}, index = 0, fixtureId = "live") {
     "Name",
     "name"
   ], `${marketType} ${index + 1}`));
-  const line = pickValue(entry, ["Line", "line", "Handicap", "handicap", "Total", "total"]);
-  const id = pickString(entry, ["id", "Id", "MarketId", "marketId"], [
+  const rawSelection = pickString(entry, ["Selection", "selection", "Outcome", "outcome", "Participant", "participant", "Name", "name"], selection);
+  const line = marketLineValue(entry);
+  const bookmakerId = pickString(entry, ["BookmakerId", "bookmakerId"], "");
+  const id = pickString(entry, ["MarketId", "marketId"], stableOddsId({
     fixtureId,
+    bookmakerId,
     marketType,
-    selection,
-    line ?? ""
-  ].join(":").replace(/[^a-z0-9:_-]/gi, "_"));
+    marketPeriod,
+    line,
+    selection: rawSelection
+  }));
   const decimal = pickNumber(entry, [
     "Decimal",
     "decimal",
@@ -402,7 +438,10 @@ function normalizeTxlineOddsEntry(entry = {}, index = 0, fixtureId = "live") {
     selection,
     label: pickString(entry, ["Label", "label", "MarketName", "marketName"], selection),
     type: marketType,
+    period: marketPeriod,
     line: line === undefined ? undefined : Number(line),
+    priceTs: pickNumber(entry, ["Ts", "ts", "Timestamp", "timestamp"], 0),
+    txlineProbability: pickString(entry, ["PctValue", "pctValue"], ""),
     raw: entry
   };
 }

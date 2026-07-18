@@ -24,7 +24,9 @@
 body {
   margin: 0;
   min-width: 320px;
+  height: 100vh;
   min-height: 100vh;
+  overflow: hidden;
   background:
     linear-gradient(90deg, rgba(255, 255, 255, 0.026) 1px, transparent 1px),
     linear-gradient(180deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px),
@@ -45,11 +47,13 @@ button {
 }
 
 .app-shell {
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
   display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   gap: 8px;
   padding: 10px;
+  overflow: hidden;
 }
 
 .topbar,
@@ -197,12 +201,14 @@ select {
 
 .terminal-grid {
   min-height: 0;
+  overflow: hidden;
   display: grid;
-  grid-template-columns: minmax(270px, 0.85fr) minmax(420px, 1.4fr) minmax(320px, 1fr);
-  grid-template-rows: minmax(340px, 1fr) minmax(230px, 0.72fr);
+  grid-template-columns: minmax(260px, 0.62fr) minmax(390px, 0.92fr) minmax(560px, 1.55fr);
+  grid-template-rows: minmax(0, 0.9fr) minmax(0, 0.75fr) minmax(0, 0.45fr);
   grid-template-areas:
     "tape match odds"
-    "tape scanner settlement";
+    "tape match odds"
+    "scanner settlement odds";
   gap: 8px;
 }
 
@@ -410,7 +416,7 @@ select {
 }
 
 .chart-wrap {
-  min-height: 220px;
+  min-height: 150px;
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--line);
@@ -446,7 +452,7 @@ select {
 .chart-line {
   fill: none;
   stroke: var(--green);
-  stroke-width: 3;
+  stroke-width: 2.5;
 }
 
 .chart-area {
@@ -463,51 +469,156 @@ select {
   font-size: 12px;
 }
 
-.odds-table table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 11px;
+.odds-table {
+  flex: 1;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 10px;
 }
 
-.odds-table th,
-.odds-table td {
-  border-bottom: 1px solid rgba(38, 49, 63, 0.72);
-  padding: 8px 7px;
-  text-align: right;
-  white-space: nowrap;
+.wager-group {
+  border: 1px solid var(--line);
+  background: rgba(7, 12, 17, 0.78);
 }
 
-.odds-table th:first-child,
-.odds-table td:first-child {
-  text-align: left;
+.wager-group-head {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 10px;
 }
 
-.odds-table th {
-  position: sticky;
-  top: 0;
-  z-index: 1;
+.wager-group-head strong {
+  display: block;
+  font-size: 12px;
+}
+
+.wager-group-head span {
   color: var(--muted);
-  background: var(--panel);
-  text-transform: uppercase;
   font-size: 10px;
+  text-transform: uppercase;
 }
 
-.odds-row {
+.wager-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(218px, 1fr));
+  gap: 8px;
+  padding: 8px;
+}
+
+.wager-card {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto auto 78px auto;
+  gap: 8px;
+  border: 1px solid rgba(63, 75, 88, 0.78);
+  background: #0a0f14;
+  padding: 9px;
   cursor: pointer;
 }
 
-.odds-row:hover,
-.odds-row.selected {
-  background: rgba(52, 211, 153, 0.08);
+.wager-card:hover,
+.wager-card.selected {
+  border-color: var(--green);
+  background: rgba(52, 211, 153, 0.075);
 }
 
-.market-label {
-  display: grid;
-  gap: 4px;
+.wager-card-head {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
 }
 
-.market-label small {
+.wager-card-head > div {
+  min-width: 0;
+}
+
+.wager-card-head strong {
+  display: block;
+  font-size: 14px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.wager-card-head small {
+  display: block;
+  margin-top: 3px;
   color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.wager-quote-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.wager-quote-grid div {
+  min-width: 0;
+  border: 1px solid rgba(38, 49, 63, 0.72);
+  padding: 6px;
+}
+
+.wager-quote-grid span,
+.wager-card-foot {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.wager-quote-grid strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.mini-chart {
+  min-height: 70px;
+  border: 1px solid rgba(38, 49, 63, 0.72);
+  background: rgba(2, 6, 9, 0.42);
+  padding: 4px;
+}
+
+.mini-chart svg {
+  width: 100%;
+  height: 100%;
+  min-height: 62px;
+  display: block;
+}
+
+.mini-chart .chart-line {
+  stroke-width: 2;
+}
+
+.mini-chart-empty {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.wager-card-foot {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.wager-card-foot span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .positive {
@@ -744,8 +855,8 @@ a {
     grid-template-rows: minmax(330px, auto) minmax(330px, auto) minmax(240px, auto);
     grid-template-areas:
       "match odds"
-      "tape scanner"
-      "settlement settlement";
+      "scanner odds"
+      "tape settlement";
   }
 
   .status-bar {
@@ -754,7 +865,15 @@ a {
 }
 
 @media (max-width: 720px) {
+  body {
+    height: auto;
+    overflow: auto;
+  }
+
   .app-shell {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
     padding: 6px;
   }
 
@@ -795,8 +914,7 @@ a {
     grid-template-columns: 1fr 1fr;
   }
 
-  .odds-table th:nth-child(5),
-  .odds-table td:nth-child(5) {
-    display: none;
+  .wager-grid {
+    grid-template-columns: 1fr;
   }
 }
