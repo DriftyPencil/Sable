@@ -14,6 +14,8 @@ const state = {
   selectedMarketId: null,
   liveStatus: null,
   marketNotice: "",
+  historyBackfillFixtureId: "",
+  historyLoading: false,
   drawerOpen: false,
   activePane: "match",
   commandLog: [
@@ -43,6 +45,11 @@ function odds(value) {
   return Number(value).toFixed(2);
 }
 
+function preciseOdds(value) {
+  if (!value) return "--";
+  return Number(value).toFixed(3);
+}
+
 function bps(value) {
   if (!Number.isFinite(value)) return "0 bps";
   const sign = value > 0 ? "+" : "";
@@ -51,6 +58,18 @@ function bps(value) {
 
 function implied(decimal) {
   return decimal > 0 ? 1 / decimal : 0;
+}
+
+function finiteNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function pctValue(value, fallbackDecimal = 0) {
+  const number = Number(value);
+
+  if (Number.isFinite(number)) return number / 100;
+  return implied(Number(fallbackDecimal));
 }
 
 function clockLabel(clock) {
@@ -103,12 +122,13 @@ function fixtureStartLabel(startTime) {
 }
 
 function fixtureOptionLabel(fixture) {
-  const sport = fixture.metadata.sport || "Soccer";
+  const rawSport = fixture.metadata.sport || "";
+  const sportPrefix = rawSport && rawSport !== "Unknown" ? `${rawSport} · ` : "";
   const label = fixture.metadata.label || "Fixture";
   const start = fixtureStartLabel(fixture.metadata.startTime);
   const fixtureId = fixture.metadata.fixtureId || "";
 
-  return `${sport} · ${label} · ${start} · #${fixtureId}`;
+  return `${sportPrefix}${label} · ${start} · #${fixtureId}`;
 }
 
 function setActivePane(pane) {
@@ -333,13 +353,18 @@ function reduceMatchEvent(event) {
 }
 
 function applyOddsTick(event) {
-  for (const quote of event.payload.markets || []) {
-    const market = state.markets.get(quote.id) || {
+  for (const rawQuote of event.payload.markets || []) {
+    const quote = normalizeIncomingMarketQuote(rawQuote, event.fixtureId);
+    const existingMarket = state.markets.get(quote.id) || {
       id: quote.id,
       fixtureId: event.fixtureId,
       label: quote.label || quote.id,
       selection: quote.selection || quote.id,
       type: quote.type || "unknown",
+      family: quote.family || "Market",
+      periodLabel: quote.periodLabel || "Full Match",
+      groupLabel: quote.groupLabel || "Markets",
+      marketCode: quote.marketCode || quote.type || "market",
       status: "open",
       volumeUsd: 0,
       liquidityUsd: 0,
@@ -347,35 +372,27 @@ function applyOddsTick(event) {
     };
     const history = state.oddsHistory.get(quote.id) || [];
     const previous = history.at(-1);
-    const nextProbability = implied(Number(quote.decimal));
-    const snapshot = {
-      id: `${quote.id}:${event.seq}`,
-      marketId: quote.id,
-      fixtureId: event.fixtureId,
-      ts: event.ts,
-      decimal: Number(quote.decimal),
+    const nextProbability = Number.isFinite(Number(quote.impliedProbability))
+      ? Number(quote.impliedProbability)
+      : pctValue(quote.txlineProbability, quote.decimal);
+    const market = {
+      ...existingMarket,
+      ...quote,
+      currentOddsDecimal: Number(quote.decimal),
       impliedProbability: nextProbability,
       consensusSpreadBps: Number(quote.consensusSpreadBps || 0),
       sourceCount: Number(quote.sourceCount || 0),
-      volumeUsd: Number(quote.volumeUsd || market.volumeUsd || 0)
+      volumeUsd: Number(quote.volumeUsd || existingMarket.volumeUsd || 0),
+      status: existingMarket.status === "resolved" ? "resolved" : "open"
     };
-    history.push(snapshot);
-    state.oddsHistory.set(quote.id, history.slice(-40));
 
-    market.currentOddsDecimal = snapshot.decimal;
-    market.impliedProbability = snapshot.impliedProbability;
-    market.consensusSpreadBps = snapshot.consensusSpreadBps;
-    market.sourceCount = snapshot.sourceCount;
-    market.volumeUsd = snapshot.volumeUsd;
-    market.label = quote.label || market.label;
-    market.selection = quote.selection || market.selection;
-    market.type = quote.type || market.type;
-    if (quote.line !== undefined) market.line = quote.line;
-    market.status = snapshot.decimal > 0 && market.status !== "resolved" ? "open" : market.status;
-    state.markets.set(quote.id, market);
+    appendOddsHistoryPoint(market, "stream");
 
     if (previous) {
-      const deltaBps = (snapshot.impliedProbability - previous.impliedProbability) * 10000;
+      const latest = state.oddsHistory.get(quote.id)?.at(-1);
+      const deltaBps = latest
+        ? (latest.impliedProbability - previous.impliedProbability) * 10000
+        : 0;
       if (Math.abs(deltaBps) >= 650) {
         const trigger = state.events.find((item) => item.type !== "odds_tick");
         state.alerts.unshift({
@@ -434,18 +451,116 @@ async function hydrateLiveFixtures() {
 async function hydrateLiveOdds(record) {
   if (!record?.metadata?.fixtureId || !state.liveStatus?.liveReady) return;
   const markets = await fetchLiveOddsMarkets(record);
-  if (!markets.length) {
-    state.markets = new Map();
+
+  state.markets = new Map();
+  state.oddsHistory = new Map();
+  await hydrateLiveOddsHistory(record);
+  seedOddsHistory(markets, "snapshot");
+
+  if (!state.markets.size) {
     state.selectedMarketId = null;
-    state.marketNotice = `No TxODDS odds snapshot is available for ${record.metadata.label}.`;
-    log("out", `No TxODDS odds snapshot for ${record.metadata.label}.`);
+    state.marketNotice = `No TxODDS odds snapshot or update history is available for ${record.metadata.label}.`;
+    log("out", `No TxODDS odds data for ${record.metadata.label}.`);
     return;
   }
 
-  state.markets = new Map(markets.map((market) => [market.id, market]));
-  state.selectedMarketId = markets[0].id;
+  state.selectedMarketId = state.markets.has(state.selectedMarketId)
+    ? state.selectedMarketId
+    : [...state.markets.values()].sort((a, b) => String(a.sortKey || a.id).localeCompare(String(b.sortKey || b.id)))[0]?.id || null;
   state.marketNotice = "";
-  log("out", `Loaded real TxODDS odds for ${record.metadata.label}.`);
+  log("out", `Loaded ${state.markets.size} real TxODDS wager histories for ${record.metadata.label}.`);
+}
+
+async function hydrateLiveOddsHistory(record) {
+  if (!record?.metadata?.fixtureId || !state.liveStatus?.liveReady) return;
+
+  const response = await fetch(`/api/txline/odds-history/${encodeURIComponent(record.metadata.fixtureId)}?hours=12`);
+
+  if (!response.ok) {
+    log("out", `TxODDS odds history failed with ${response.status}. Live ticks will build history from here.`);
+    return;
+  }
+
+  const payload = await response.json();
+  const rawRows = Array.isArray(payload) ? payload : payload.rows;
+  const historyMarkets = normalizeOddsSnapshot(rawRows, record.metadata.fixtureId, record.metadata.teams);
+
+  seedOddsHistory(historyMarkets, "history");
+
+  if (historyMarkets.length) {
+    log("out", `Backfilled ${historyMarkets.length} TxODDS historical price events.`);
+  }
+}
+
+function seedOddsHistory(markets = [], source = "history") {
+  for (const market of markets) {
+    appendOddsHistoryPoint(market, source);
+  }
+}
+
+function registerMarket(market, source = "history") {
+  const existing = state.markets.get(market.id) || {};
+  const sourceStatus = source === "history" ? "history" : market.status || "open";
+  const status = existing.status === "resolved"
+    ? existing.status
+    : existing.status === "open" && source === "history"
+      ? existing.status
+      : sourceStatus;
+  const next = {
+    ...existing,
+    ...market,
+    status
+  };
+
+  state.markets.set(market.id, next);
+  return next;
+}
+
+function refreshMarketFromHistory(marketId = "") {
+  const market = state.markets.get(marketId);
+  const history = state.oddsHistory.get(marketId) || [];
+  const latest = history.at(-1);
+
+  if (!market || !latest) return;
+
+  state.markets.set(marketId, {
+    ...market,
+    currentOddsDecimal: latest.decimal,
+    impliedProbability: latest.impliedProbability,
+    consensusSpreadBps: latest.consensusSpreadBps,
+    sourceCount: latest.sourceCount,
+    volumeUsd: latest.volumeUsd,
+    priceTs: new Date(latest.ts).getTime()
+  });
+}
+
+function appendOddsHistoryPoint(market, source = "history") {
+  const registeredMarket = registerMarket(market, source);
+  const ts = market.priceTs
+    ? new Date(market.priceTs).toISOString()
+    : new Date().toISOString();
+  const history = state.oddsHistory.get(registeredMarket.id) || [];
+  const point = {
+    id: `${market.id}:${market.priceTs || Date.now()}`,
+    marketId: registeredMarket.id,
+    fixtureId: registeredMarket.fixtureId,
+    ts,
+    decimal: Number(market.currentOddsDecimal),
+    impliedProbability: Number(market.impliedProbability),
+    consensusSpreadBps: Number(market.consensusSpreadBps || 0),
+    sourceCount: Number(market.sourceCount || 0),
+    volumeUsd: Number(market.volumeUsd || 0)
+  };
+  const duplicate = history.some((item) => (
+    item.ts === point.ts && Number(item.decimal) === Number(point.decimal)
+  ));
+
+  if (!duplicate && Number.isFinite(point.decimal) && point.decimal > 0) {
+    history.push(point);
+    history.sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
+    state.oddsHistory.set(registeredMarket.id, history);
+    refreshMarketFromHistory(registeredMarket.id);
+  }
 }
 
 async function hydrateLiveScore(record) {
@@ -479,7 +594,7 @@ async function fetchLiveOddsMarkets(record) {
   }
 
   const rawOdds = await response.json();
-  const markets = normalizeOddsSnapshot(rawOdds, record.metadata.fixtureId);
+  const markets = normalizeOddsSnapshot(rawOdds, record.metadata.fixtureId, record.metadata.teams);
   return markets;
 }
 
@@ -545,7 +660,7 @@ function sportName(sportId) {
     case "6":
       return "Ice Hockey";
     default:
-      return "Soccer";
+      return "Unknown";
   }
 }
 
@@ -558,24 +673,106 @@ function marketLine(row) {
   return lineMatch ? Number(lineMatch[1]) : undefined;
 }
 
-function marketSelectionLabel(row, rawSelection, marketType, line) {
-  const selection = String(rawSelection)
-    .replace("part1", "Participant 1")
-    .replace("part2", "Participant 2");
+function marketPeriod(row = {}) {
+  return String(row.MarketPeriod || row.marketPeriod || row.Period || row.period || "");
+}
+
+function periodLabel(period = "") {
+  if (period === "half=1") return "1st Half";
+  if (period === "half=2") return "2nd Half";
+  return "Full Match";
+}
+
+function marketFamily(marketType = "") {
+  const type = String(marketType).toUpperCase();
+
+  if (type.includes("1X2")) return "Match Winner";
+  if (type.includes("ASIANHANDICAP")) return "Asian Handicap";
+  if (type.includes("OVERUNDER")) return "Total Goals";
+  return "Market";
+}
+
+function marketCode(marketType = "") {
+  const type = String(marketType).toUpperCase();
+
+  if (type.includes("1X2")) return "1X2";
+  if (type.includes("ASIANHANDICAP")) return "AH";
+  if (type.includes("OVERUNDER")) return "O/U";
+  return type || "MARKET";
+}
+
+function displayLine(line) {
+  if (line === undefined) return "";
+  if (line === 0) return "0";
+  return `${line > 0 ? "+" : ""}${line}`;
+}
+
+function selectionTeam(rawSelection = "", teams = {}) {
+  const selection = String(rawSelection).toLowerCase();
+
+  if (selection === "part1") return teams.home || "Participant 1";
+  if (selection === "part2") return teams.away || "Participant 2";
+  if (selection === "draw") return "Draw";
+  if (selection === "over") return "Over";
+  if (selection === "under") return "Under";
+  return String(rawSelection)
+    .replace("part1", teams.home || "Participant 1")
+    .replace("part2", teams.away || "Participant 2");
+}
+
+function selectionSpecificLine(rawSelection = "", marketType = "", line = undefined) {
+  const selection = String(rawSelection).toLowerCase();
+  const type = String(marketType).toUpperCase();
+
+  if (line === undefined) return undefined;
+  if (type.includes("ASIANHANDICAP") && selection === "part2") return Number(line) === 0 ? 0 : -Number(line);
+  return Number(line);
+}
+
+function marketSelectionLabel(row, rawSelection, marketType, line, teams = {}) {
+  const selection = selectionTeam(rawSelection, teams);
   const normalizedSelection = selection.toLowerCase();
 
   if ((normalizedSelection === "over" || normalizedSelection === "under") && line !== undefined) {
-    return `${selection[0].toUpperCase()}${selection.slice(1)} ${line}`;
+    return `${selection} ${line}`;
   }
 
-  if (marketType.includes("ASIANHANDICAP") && line !== undefined && selection.startsWith("Participant")) {
-    return `${selection} ${line > 0 ? "+" : ""}${line}`;
+  if (String(marketType).toUpperCase().includes("ASIANHANDICAP") && line !== undefined) {
+    const sideLine = selectionSpecificLine(rawSelection, marketType, line);
+    return `${selection} ${displayLine(sideLine)}`;
   }
 
   return selection;
 }
 
-function normalizeOddsSnapshot(rawOdds, fixtureId) {
+function stableMarketId(fixtureId = "", marketType = "", period = "", line = undefined, rawSelection = "") {
+  return [
+    fixtureId || "fixture",
+    marketType || "market",
+    period || "full",
+    line === undefined ? "na" : line,
+    rawSelection || "selection"
+  ].join(":").replace(/[^a-z0-9:_+.-]/gi, "_");
+}
+
+function marketSortKey({ family = "", period = "", line = undefined, selection = "" } = {}) {
+  const familyRank = {
+    "Match Winner": 1,
+    "Asian Handicap": 2,
+    "Total Goals": 3,
+    "Market": 9
+  }[family] || 9;
+  const periodRank = period === "half=1" ? 2 : period === "half=2" ? 3 : 1;
+  const lineRank = line === undefined ? 0 : Number(line) + 100;
+
+  return `${familyRank}.${periodRank}.${String(lineRank).padStart(8, "0")}.${selection}`;
+}
+
+function rowTimestamp(row = {}) {
+  return finiteNumber(row.Ts || row.ts || row.Timestamp || row.timestamp, 0);
+}
+
+function normalizeOddsSnapshot(rawOdds, fixtureId, teams = {}) {
   const rows = Array.isArray(rawOdds)
     ? rawOdds
     : ["markets", "Markets", "odds", "Odds", "data", "Data"].flatMap((key) => (
@@ -584,25 +781,43 @@ function normalizeOddsSnapshot(rawOdds, fixtureId) {
 
   return rows.flatMap(expandOddsRow).map((row, index) => {
     const marketType = String(row.SuperOddsType || row.superOddsType || row.MarketType || row.marketType || row.type || "market");
-    const rawSelection = row.Selection || row.selection || row.Outcome || row.outcome || row.Name || row.name || `${marketType} ${index + 1}`;
+    const rawSelection = String(row.Selection || row.selection || row.Outcome || row.outcome || row.Name || row.name || `${marketType} ${index + 1}`);
     const line = marketLine(row);
-    const selection = marketSelectionLabel(row, rawSelection, marketType, line);
-    const id = String(row.Id || row.id || row.MarketId || row.marketId || `${fixtureId}:${marketType}:${selection}:${line ?? ""}`)
-      .replace(/[^a-z0-9:_-]/gi, "_");
+    const period = marketPeriod(row);
+    const family = marketFamily(marketType);
+    const selection = marketSelectionLabel(row, rawSelection, marketType, line, teams);
+    const specificLine = selectionSpecificLine(rawSelection, marketType, line);
+    const id = String(row.MarketId || row.marketId || stableMarketId(fixtureId, marketType, period, line, rawSelection));
     const decimal = Number(row.Decimal || row.decimal || row.DecimalOdds || row.decimalOdds || row.Price || row.price || row.Odds || row.odds || 0);
-    const probability = implied(decimal);
+    const probability = pctValue(row.PctValue ?? row.pctValue, decimal);
+    const groupLabel = `${periodLabel(period)} ${family}`;
+    const lineLabel = line === undefined
+      ? ""
+      : String(marketType).toUpperCase().includes("ASIANHANDICAP")
+        ? displayLine(specificLine)
+        : String(line);
     return {
       id,
       fixtureId,
       type: marketType,
-      label: String(row.Label || row.label || row.MarketName || row.marketName || selection),
+      family,
+      period,
+      periodLabel: periodLabel(period),
+      groupLabel,
+      marketCode: marketCode(marketType),
+      label: groupLabel,
       selection,
       line: line === undefined ? undefined : Number(line),
+      lineLabel,
       status: decimal > 0 ? "open" : "suspended",
       currentOddsDecimal: decimal,
       impliedProbability: probability,
       volumeUsd: Number(row.VolumeUsd || row.volumeUsd || row.Volume || row.volume || 0),
       liquidityUsd: Number(row.LiquidityUsd || row.liquidityUsd || row.Liquidity || row.liquidity || 0),
+      consensusSpreadBps: Number(row.ConsensusSpreadBps || row.consensusSpreadBps || 0),
+      sourceCount: Number(row.SourceCount || row.sourceCount || 1),
+      priceTs: rowTimestamp(row),
+      sortKey: marketSortKey({ family, period, line, selection }),
       resolutionRule: {
         statKeys: [1, 2],
         predicate: "Resolve with TxODDS score stat-validation proof"
@@ -618,13 +833,48 @@ function expandOddsRow(row) {
   if (Array.isArray(prices) && Array.isArray(priceNames)) {
     return prices.map((price, index) => ({
       ...row,
-      Id: `${row.MessageId || row.messageId || row.FixtureId || "market"}:${priceNames[index] || index}`,
+      RawMessageId: row.MessageId || row.messageId || "",
+      PriceIndex: index,
       Selection: priceNames[index] || `selection_${index + 1}`,
       Decimal: Number(price) / 1000,
       PctValue: pctValues[index]
     }));
   }
   return [row];
+}
+
+function normalizeIncomingMarketQuote(quote = {}, fixtureId = "") {
+  const raw = quote.raw || quote;
+  const marketType = String(quote.type || raw.SuperOddsType || raw.superOddsType || raw.MarketType || raw.marketType || "market");
+  const rawSelection = String(raw.Selection || raw.selection || quote.rawSelection || quote.selection || "");
+  const line = quote.line !== undefined ? Number(quote.line) : marketLine(raw);
+  const period = quote.period || marketPeriod(raw);
+  const family = marketFamily(marketType);
+  const selection = marketSelectionLabel(raw, rawSelection, marketType, line, state.match?.teams || {});
+  const decimal = Number(quote.decimal || quote.currentOddsDecimal || raw.Decimal || raw.decimal || 0);
+  const groupLabel = `${periodLabel(period)} ${family}`;
+  const id = stableMarketId(fixtureId, marketType, period, line, rawSelection || selection);
+
+  return {
+    ...quote,
+    id,
+    fixtureId,
+    decimal,
+    impliedProbability: pctValue(quote.txlineProbability ?? raw.PctValue ?? raw.pctValue, decimal),
+    txlineProbability: quote.txlineProbability ?? raw.PctValue ?? raw.pctValue,
+    selection,
+    type: marketType,
+    family,
+    period,
+    periodLabel: periodLabel(period),
+    groupLabel,
+    marketCode: marketCode(marketType),
+    line,
+    lineLabel: line === undefined ? "" : String(line),
+    label: groupLabel,
+    priceTs: quote.priceTs || rowTimestamp(raw),
+    sortKey: marketSortKey({ family, period, line, selection })
+  };
 }
 
 function renderAll() {
@@ -650,7 +900,7 @@ function renderStatus() {
     ["FIXTURE", state.match?.label || "--", ""],
     ["CLOCK", clockLabel(state.match?.clock), ""],
     ["LAST EVENT", state.lastEventAt ? state.lastEventAt.toLocaleTimeString() : "--", ""],
-    ["MARKET", selected?.id || "--", ""]
+    ["WAGER", selected?.selection || "--", ""]
   ].map(([label, value, klass]) => (
     `<div class="status-cell"><span>${label}</span><strong class="status-value ${klass}">${escapeHtml(value)}</strong></div>`
   )).join("");
@@ -728,7 +978,7 @@ function renderMatchDetail() {
     </div>
     <div class="metric-grid">
       <div class="metric"><span>Fixture ID</span><strong>${escapeHtml(match.fixtureId)}</strong></div>
-      <div class="metric"><span>Sport</span><strong>${escapeHtml(match.sport || "Sport")}</strong></div>
+      <div class="metric"><span>Sport</span><strong>${escapeHtml(match.sport || "Unknown")}</strong></div>
       <div class="metric"><span>Competition</span><strong>${escapeHtml(match.competition)}</strong></div>
       <div class="metric"><span>Latest Seq</span><strong>${latestEvent?.seq || "--"}</strong></div>
     </div>
@@ -736,52 +986,162 @@ function renderMatchDetail() {
 }
 
 function renderOdds() {
-  const markets = [...state.markets.values()];
+  const markets = [...state.markets.values()].sort((a, b) => String(a.sortKey || a.id).localeCompare(String(b.sortKey || b.id)));
+  const groupedMarkets = groupMarkets(markets);
+
   if (!markets.length) {
     els.oddsMonitor.innerHTML = `<div class="empty-state">${escapeHtml(state.marketNotice || "No markets loaded.")}</div>`;
     return;
   }
 
-  els.oddsMonitor.innerHTML = `
-    <table>
-      <thead>
-        <tr>
-          <th>Market</th>
-          <th>Odds</th>
-          <th>Impl</th>
-          <th>Move</th>
-          <th>Vol</th>
-          <th>Status</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${markets.map((market) => {
-          const history = state.oddsHistory.get(market.id) || [];
-          const latest = history.at(-1);
-          const previous = history.at(-2);
-          const delta = latest && previous
-            ? (latest.impliedProbability - previous.impliedProbability) * 10000
-            : 0;
-          const deltaClass = delta > 0 ? "positive" : delta < 0 ? "negative" : "muted";
-          const statusClass = market.status === "resolved" ? "good" : market.status === "open" ? "" : "warn";
-          return `
-            <tr class="odds-row ${state.selectedMarketId === market.id ? "selected" : ""}" data-market-id="${escapeHtml(market.id)}">
-              <td>
-                <div class="market-label">
-                  <strong>${escapeHtml(market.selection)}</strong>
-                  <small>${escapeHtml(market.type)} / ${escapeHtml(market.id)}</small>
-                </div>
-              </td>
-              <td>${odds(market.currentOddsDecimal)}</td>
-              <td>${pct(market.impliedProbability)}</td>
-              <td class="${deltaClass}">${bps(delta)}</td>
-              <td>${money(market.volumeUsd)}</td>
-              <td><span class="badge ${statusClass}">${escapeHtml(market.status)}</span></td>
-            </tr>
-          `;
-        }).join("")}
-      </tbody>
-    </table>
+  els.oddsMonitor.innerHTML = groupedMarkets.map(([groupLabel, groupMarketsList]) => `
+    <section class="wager-group">
+      <div class="wager-group-head">
+        <div>
+          <strong>${escapeHtml(groupLabel)}</strong>
+          <span>${groupMarketsList.length} outcomes</span>
+        </div>
+        <span class="badge">${escapeHtml(groupMarketsList[0]?.marketCode || "MARKET")}</span>
+      </div>
+      <div class="wager-grid">
+        ${groupMarketsList.map(renderWagerCard).join("")}
+      </div>
+    </section>
+  `).join("");
+}
+
+function groupMarkets(markets = []) {
+  const groups = new Map();
+
+  for (const market of markets) {
+    const label = market.groupLabel || market.label || "Markets";
+    const list = groups.get(label) || [];
+
+    list.push(market);
+    groups.set(label, list);
+  }
+
+  return [...groups.entries()];
+}
+
+function renderWagerCard(market) {
+  const history = state.oddsHistory.get(market.id) || [];
+  const latest = history.at(-1);
+  const first = history[0];
+  const probabilityDelta = latest && first
+    ? (latest.impliedProbability - first.impliedProbability) * 10000
+    : 0;
+  const priceDelta = latest && first
+    ? latest.decimal - first.decimal
+    : 0;
+  const deltaClass = probabilityDelta > 0 ? "positive" : probabilityDelta < 0 ? "negative" : "muted";
+  const statusClass = market.status === "resolved" ? "good" : market.status === "open" ? "" : "warn";
+  const selectedClass = state.selectedMarketId === market.id ? "selected" : "";
+  const lastUpdated = market.priceTs ? new Date(market.priceTs).toLocaleTimeString() : "--";
+
+  return `
+    <article class="wager-card ${selectedClass}" data-market-id="${escapeHtml(market.id)}">
+      <div class="wager-card-head">
+        <div>
+          <strong>${escapeHtml(market.selection)}</strong>
+          <small>${escapeHtml(market.periodLabel || "Full Match")} / ${escapeHtml(market.marketCode || market.type)}</small>
+        </div>
+        <span class="badge ${statusClass}">${escapeHtml(market.status)}</span>
+      </div>
+      <div class="wager-quote-grid">
+        <div>
+          <span>Price</span>
+          <strong>${preciseOdds(market.currentOddsDecimal)}</strong>
+        </div>
+        <div>
+          <span>Implied</span>
+          <strong>${pct(market.impliedProbability)}</strong>
+        </div>
+        <div>
+          <span>Move</span>
+          <strong class="${deltaClass}">${priceDelta === 0 ? "0.000" : `${priceDelta > 0 ? "+" : ""}${priceDelta.toFixed(3)}`}</strong>
+        </div>
+      </div>
+      <div class="mini-chart">${renderMiniPriceChart(history)}</div>
+      <div class="wager-card-foot">
+        <span class="${deltaClass}">${bps(probabilityDelta)}</span>
+        <span>${history.length} ticks</span>
+        <span>${escapeHtml(lastUpdated)}</span>
+      </div>
+    </article>
+  `;
+}
+
+function sortedPriceHistory(history = []) {
+  return history
+    .filter((item) => Number.isFinite(Number(item.decimal)))
+    .sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
+}
+
+function priceChartPoints(history = [], width = 240, height = 70, pad = 6) {
+  const points = sortedPriceHistory(history);
+  const values = points.map((item) => Number(item.decimal));
+  const timestamps = points.map((item) => new Date(item.ts).getTime()).filter(Number.isFinite);
+  let min = Math.min(...values);
+  let max = Math.max(...values);
+  let span = max - min;
+  const minTs = Math.min(...timestamps);
+  const maxTs = Math.max(...timestamps);
+  const timeSpan = maxTs - minTs;
+
+  if (!points.length) return [];
+
+  if (!span) {
+    min = Math.max(1, min - 0.05);
+    max += 0.05;
+    span = max - min;
+  }
+
+  return points.map((item) => {
+    const ts = new Date(item.ts).getTime();
+    const x = timeSpan
+      ? pad + ((ts - minTs) / timeSpan) * (width - pad * 2)
+      : width / 2;
+    const y = height - pad - ((Number(item.decimal) - min) / span) * (height - pad * 2);
+
+    return { x, y, item, min, max };
+  });
+}
+
+function stepPath(points = [], width = 240, pad = 6) {
+  if (!points.length) return "";
+  if (points.length === 1) return `M ${pad} ${points[0].y} H ${width - pad}`;
+
+  return points.slice(1).reduce((path, point) => (
+    `${path} H ${point.x} V ${point.y}`
+  ), `M ${points[0].x} ${points[0].y}`);
+}
+
+function stepAreaPath(points = [], width = 240, height = 70, pad = 6) {
+  if (!points.length) return "";
+  if (points.length === 1) {
+    return `M ${pad} ${height - pad} L ${pad} ${points[0].y} H ${width - pad} L ${width - pad} ${height - pad} Z`;
+  }
+
+  return `${stepPath(points, width, pad)} L ${points.at(-1).x} ${height - pad} L ${points[0].x} ${height - pad} Z`;
+}
+
+function renderMiniPriceChart(history = []) {
+  const width = 240;
+  const height = 70;
+  const pad = 6;
+  const points = priceChartPoints(history, width, height, pad);
+
+  if (!points.length) {
+    return `<div class="mini-chart-empty">No history</div>`;
+  }
+
+  return `
+    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Decimal price history">
+      <line class="chart-grid" x1="${pad}" x2="${width - pad}" y1="${height - pad}" y2="${height - pad}"></line>
+      <path class="chart-line" d="${stepPath(points, width, pad)}"></path>
+      ${points.length === 1 ? `<text x="${pad}" y="13" fill="#8a98a9" font-size="9">LAST KNOWN</text>` : ""}
+    </svg>
   `;
 }
 
@@ -805,40 +1165,36 @@ function renderScanner() {
 
 function renderChart() {
   const market = state.markets.get(state.selectedMarketId);
-  const history = state.oddsHistory.get(state.selectedMarketId) || [];
-  els.chartMarketLabel.textContent = market ? `${market.id} ${market.selection}` : "Select market";
+  const history = sortedPriceHistory(state.oddsHistory.get(state.selectedMarketId) || []);
+  els.chartMarketLabel.textContent = market ? `${market.selection} / ${market.periodLabel || "Full Match"}` : "Select wager";
 
-  if (!market || history.length < 2) {
-    els.oddsChart.innerHTML = `<div class="empty-state">Awaiting at least two odds ticks for the selected market.</div>`;
+  if (!market || !history.length) {
+    els.oddsChart.innerHTML = `<div class="empty-state">Awaiting TxODDS price history for the selected wager.</div>`;
     return;
   }
 
   const width = 560;
   const height = 190;
   const pad = 20;
-  const values = history.map((item) => item.impliedProbability);
-  const min = Math.max(0, Math.min(...values) - 0.04);
-  const max = Math.min(1, Math.max(...values) + 0.04);
-  const span = max - min || 1;
-  const points = history.map((item, index) => {
-    const x = pad + (index / Math.max(1, history.length - 1)) * (width - pad * 2);
-    const y = height - pad - ((item.impliedProbability - min) / span) * (height - pad * 2);
-    return { x, y, item };
-  });
-  const line = points.map((point) => `${point.x},${point.y}`).join(" ");
-  const area = `${pad},${height - pad} ${line} ${width - pad},${height - pad}`;
+  const points = priceChartPoints(history, width, height, pad);
+  const min = Math.min(...points.map((point) => point.min));
+  const max = Math.max(...points.map((point) => point.max));
+  const line = stepPath(points, width, pad);
+  const area = stepAreaPath(points, width, height, pad);
+  const tickLabel = history.length === 1 ? "1 event / last known" : `${history.length} events`;
 
   els.oddsChart.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Implied probability chart">
+    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Decimal price history chart">
       <line class="chart-grid" x1="${pad}" x2="${width - pad}" y1="${pad}" y2="${pad}"></line>
       <line class="chart-grid" x1="${pad}" x2="${width - pad}" y1="${height / 2}" y2="${height / 2}"></line>
       <line class="chart-grid" x1="${pad}" x2="${width - pad}" y1="${height - pad}" y2="${height - pad}"></line>
-      <polygon class="chart-area" points="${area}"></polygon>
-      <polyline class="chart-line" points="${line}"></polyline>
+      <path class="chart-area" d="${area}"></path>
+      <path class="chart-line" d="${line}"></path>
       ${points.map((point) => `<circle class="chart-dot" cx="${point.x}" cy="${point.y}" r="4"></circle>`).join("")}
-      <text x="${pad}" y="16" fill="#8a98a9" font-size="10">${pct(max)}</text>
-      <text x="${pad}" y="${height - 6}" fill="#8a98a9" font-size="10">${pct(min)}</text>
-      <text x="${width - 160}" y="16" fill="#34d399" font-size="11">Last ${pct(history.at(-1).impliedProbability)}</text>
+      <text x="${pad}" y="16" fill="#8a98a9" font-size="10">${preciseOdds(max)}</text>
+      <text x="${pad}" y="${height - 6}" fill="#8a98a9" font-size="10">${preciseOdds(min)}</text>
+      <text x="${width - 155}" y="16" fill="#34d399" font-size="11">Last ${preciseOdds(history.at(-1).decimal)}</text>
+      <text x="${width - 155}" y="32" fill="#8a98a9" font-size="10">${escapeHtml(tickLabel)}</text>
     </svg>
   `;
 }

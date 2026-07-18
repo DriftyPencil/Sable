@@ -6,6 +6,7 @@ import { handleSettlement } from "./settlement.js";
 import {
   attachFixtureScoreSnapshots,
   fetchTxlineFixtures,
+  fetchTxlineOddsHistory,
   fetchTxlineOdds,
   fetchTxlineScoresWithStatus,
   liveStatusPayload
@@ -66,6 +67,14 @@ export function createRequestHandler(context = {}) {
 
       if (req.method === "GET" && pathname.startsWith("/api/txline/odds/")) {
         json(res, 200, await fetchTxlineOdds(pathBasename(pathname)));
+        return;
+      }
+
+      if (req.method === "GET" && pathname.startsWith("/api/txline/odds-history/")) {
+        json(res, 200, await fetchTxlineOddsHistory(pathBasename(pathname), {
+          hours: url.searchParams.get("hours") || 2,
+          interval: url.searchParams.get("interval") || 0
+        }));
         return;
       }
 

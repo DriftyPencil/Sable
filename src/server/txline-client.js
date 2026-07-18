@@ -49,6 +49,107 @@ export async function fetchTxlineOdds(fixtureId = "") {
   return fetchTxlineJson(`/odds/snapshot/${encodeURIComponent(fixtureId)}`);
 }
 
+function fixtureIdFromRow(row = {}) {
+  return String(row.FixtureId || row.fixtureId || row.FixtureID || row.fixture_id || "");
+}
+
+function oddsRowTimestamp(row = {}) {
+  const value = Number(row.Ts || row.ts || row.Timestamp || row.timestamp || 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function hourlyOddsBuckets(referenceMs = Date.now(), hoursBack = 2) {
+  const cappedHoursBack = Math.min(Math.max(Number(hoursBack) || 0, 0), 12);
+  const reference = new Date(referenceMs);
+  const hourStartMs = Date.UTC(
+    reference.getUTCFullYear(),
+    reference.getUTCMonth(),
+    reference.getUTCDate(),
+    reference.getUTCHours()
+  );
+  const buckets = [];
+
+  for (let offset = cappedHoursBack; offset >= 0; offset -= 1) {
+    const bucketMs = hourStartMs - offset * 60 * 60 * 1000;
+    const bucketDate = new Date(bucketMs);
+
+    buckets.push({
+      epochDay: Math.floor(bucketMs / 86400000),
+      hourOfDay: bucketDate.getUTCHours()
+    });
+  }
+
+  return buckets;
+}
+
+function dedupeOddsRows(rows = []) {
+  const byKey = new Map();
+
+  for (const row of rows) {
+    const key = [
+      row.MessageId || row.messageId || "",
+      row.Ts || row.ts || "",
+      row.FixtureId || row.fixtureId || "",
+      row.SuperOddsType || row.superOddsType || "",
+      row.MarketPeriod || row.marketPeriod || "",
+      row.MarketParameters || row.marketParameters || ""
+    ].join("|");
+
+    byKey.set(key, row);
+  }
+
+  return [...byKey.values()].sort((a, b) => oddsRowTimestamp(a) - oddsRowTimestamp(b));
+}
+
+export async function fetchTxlineOddsHistory(fixtureId = "", options = {}) {
+  const hoursBack = Number(options.hoursBack ?? options.hours ?? 2);
+  const interval = Number(options.interval ?? 0);
+  const snapshotRows = await fetchTxlineOdds(fixtureId);
+  const snapshot = Array.isArray(snapshotRows) ? snapshotRows : [];
+  const latestSnapshotTs = Math.max(0, ...snapshot.map(oddsRowTimestamp));
+  const referenceMs = latestSnapshotTs || Date.now();
+  const bucketResults = await Promise.all(hourlyOddsBuckets(referenceMs, hoursBack).map(async (bucket) => {
+    const path = `/odds/updates/${bucket.epochDay}/${bucket.hourOfDay}/${interval}`;
+
+    try {
+      const rows = await fetchTxlineJson(path);
+      const bucketRows = Array.isArray(rows)
+        ? rows.filter((row) => fixtureIdFromRow(row) === fixtureId)
+        : [];
+
+      return {
+        attempt: {
+          path,
+          status: "ok",
+          count: bucketRows.length
+        },
+        rows: bucketRows
+      };
+    } catch (error) {
+      return {
+        attempt: {
+          path,
+          status: "error",
+          message: error instanceof Error ? error.message : String(error)
+        },
+        rows: []
+      };
+    }
+  }));
+  const attempts = bucketResults.map((result) => result.attempt);
+  const updateRows = bucketResults.flatMap((result) => result.rows);
+
+  return {
+    fixtureId,
+    interval,
+    hoursBack,
+    snapshotRowCount: snapshot.length,
+    updateRowCount: updateRows.length,
+    attempts,
+    rows: dedupeOddsRows([...updateRows, ...snapshot])
+  };
+}
+
 async function fetchScoreAttempt(label = "", apiPath = "") {
   let records = [];
   let error = "";
