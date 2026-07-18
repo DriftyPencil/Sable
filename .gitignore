@@ -1,0 +1,4 @@
+.env.txline
+.env*.local
+*.json.key
+node_modules
