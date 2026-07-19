@@ -4,6 +4,13 @@ import { json, serveStatic, text } from "./http.js";
 import { handleProof } from "./proofs.js";
 import { handleSettlement } from "./settlement.js";
 import {
+  handleExchangeBook,
+  handleExchangeBootstrap,
+  handleExchangeOrder,
+  handleExchangeSettle,
+  handleExchangeUser
+} from "./market-exchange.js";
+import {
   attachFixtureScoreSnapshots,
   fetchTxlineFixtures,
   fetchTxlineOddsHistory,
@@ -90,6 +97,31 @@ export function createRequestHandler(context = {}) {
 
       if (req.method === "GET" && pathname === "/api/proofs/stat") {
         await handleProof(req, res, context, url.searchParams);
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/api/exchange/bootstrap") {
+        await handleExchangeBootstrap(res);
+        return;
+      }
+
+      if (req.method === "GET" && pathname.startsWith("/api/exchange/user")) {
+        await handleExchangeUser(res, url.searchParams, pathname);
+        return;
+      }
+
+      if (req.method === "GET" && pathname.startsWith("/api/exchange/book/")) {
+        await handleExchangeBook(res, pathname);
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/exchange/orders") {
+        await handleExchangeOrder(req, res);
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/exchange/settle") {
+        await handleExchangeSettle(req, res);
         return;
       }
 
