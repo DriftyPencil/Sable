@@ -1626,6 +1626,7 @@ function renderWagerCard(market) {
   const history = state.oddsHistory.get(market.id) || [];
   const latest = history.at(-1);
   const first = history[0];
+  const currentPrice = preciseOdds(market.currentOddsDecimal);
   const probabilityDelta = latest && first
     ? (latest.impliedProbability - first.impliedProbability) * 10000
     : 0;
@@ -1656,11 +1657,11 @@ function renderWagerCard(market) {
         </div>
         ${statusBadge}
       </div>
+      <div class="wager-price-strip">
+        <span>Current Price</span>
+        <strong>${currentPrice}</strong>
+      </div>
       <div class="wager-quote-grid">
-        <div>
-          <span>Price</span>
-          <strong>${preciseOdds(market.currentOddsDecimal)}</strong>
-        </div>
         <div>
           <span>Implied</span>
           <strong>${pct(market.impliedProbability)}</strong>
@@ -1953,11 +1954,19 @@ function renderWagerSummary(market = {}, history = []) {
       </div>
       <span class="badge ${escapeHtml(liveClass)}">${escapeHtml(liveLabel)}</span>
     </div>
+    <div class="wager-hero-quote">
+      <div>
+        <span>Current Price</span>
+        <strong>${preciseOdds(price)}</strong>
+      </div>
+      <div>
+        <span>Last Tick</span>
+        <strong class="${valueClass(stats.lastDelta)}">${signedDecimal(stats.lastDelta)}</strong>
+      </div>
+    </div>
     <div class="metric-grid wager-stat-grid">
-      <div class="metric"><span>Price</span><strong>${preciseOdds(price)}</strong></div>
       <div class="metric"><span>Implied</span><strong>${pct(probability)}</strong></div>
       <div class="metric"><span>Session Move</span><strong class="${valueClass(stats.delta)}">${signedDecimal(stats.delta)}</strong></div>
-      <div class="metric"><span>Last Tick</span><strong class="${valueClass(stats.lastDelta)}">${signedDecimal(stats.lastDelta)}</strong></div>
       <div class="metric"><span>High</span><strong>${preciseOdds(stats.max)}</strong></div>
       <div class="metric"><span>Low</span><strong>${preciseOdds(stats.min)}</strong></div>
       <div class="metric"><span>Ticks</span><strong>${stats.count}</strong></div>
@@ -2125,11 +2134,12 @@ async function switchExchangeUser(userId = "trader-a") {
   renderAll();
 }
 
-function tradeExposure(side = "back", oddsValue = 0, stakeValue = 0) {
+function tradeExposure(side = "back", oddsValue = 0, stakeValue = 0, orderType = "limit") {
   const price = Number(oddsValue);
   const stake = Number(stakeValue);
 
   if (!Number.isFinite(price) || !Number.isFinite(stake)) return 0;
+  if (orderType === "market") return stake;
   return side === "lay" ? stake * Math.max(price - 1, 0) : stake;
 }
 
@@ -2181,7 +2191,7 @@ async function placeExchangeOrder() {
     state.exchangeNotice = payload.trades?.length
       ? `Matched ${payload.trades.length} trade${payload.trades.length === 1 ? "" : "s"} on ${market.selection}.`
       : orderType === "market"
-        ? `No liquidity crossed for ${market.selection}.`
+        ? `Market order queued for ${market.selection}. It will fill when opposite liquidity arrives.`
         : `${state.exchangeTicket.side === "back" ? "Back" : "Lay"} limit order posted for ${market.selection}.`;
   } finally {
     state.exchangeBusy = false;
@@ -2255,7 +2265,7 @@ async function cashOutExchangePosition() {
     state.exchangeOrderBook = payload.orderBook;
     state.exchangeNotice = payload.trades?.length
       ? `Cash out crossed ${payload.trades.length} trade${payload.trades.length === 1 ? "" : "s"} via ${payload.cashOut.closeSide}.`
-      : "No cash-out liquidity crossed.";
+      : "Cash-out market order queued until opposite liquidity arrives.";
   } finally {
     state.exchangeBusy = false;
     renderAll();
@@ -2312,7 +2322,7 @@ function renderBookLevels(levels = [], side = "back") {
   return levels.slice(0, 5).map((level) => `
     <div class="book-level">
       <span>${escapeHtml(level.outcome)}</span>
-      <strong>${preciseOdds(level.odds)}</strong>
+      <strong>${level.orderType === "market" ? "MARKET" : preciseOdds(level.odds)}</strong>
       <span>${usdc(level.totalStake)}</span>
     </div>
   `).join("");
@@ -2339,6 +2349,21 @@ function renderTradeRows(trades = []) {
       <span>${escapeHtml(trade.status)}</span>
       <strong>${escapeHtml(trade.outcome)} @ ${preciseOdds(trade.odds)}</strong>
       <span>${usdc(trade.stake)}</span>
+    </div>
+  `).join("");
+}
+
+function renderOpenPositions(positions = [], marketId = "") {
+  const visible = positions.filter((position) => position.marketId === marketId);
+
+  if (!visible.length) return `<div class="book-empty">No matched open position for this wager.</div>`;
+
+  return visible.map((position) => `
+    <div class="exchange-order position-row">
+      <span class="${position.side === "back" ? "positive" : "negative"}">${escapeHtml(position.side)}</span>
+      <strong>${escapeHtml(position.outcome)} @ ${preciseOdds(position.averageOdds)}</strong>
+      <span>${usdc(position.netStake)} net</span>
+      <button class="terminal-button order-cancel-button" type="button" data-cashout-position="true">Cash Out</button>
     </div>
   `).join("");
 }
@@ -2377,6 +2402,9 @@ function bindExchangeControls() {
   qs("#placeExchangeOrder")?.addEventListener("click", placeExchangeOrder);
   qs("#cashOutExchangePosition")?.addEventListener("click", cashOutExchangePosition);
   qs("#settleExchangeMarket")?.addEventListener("click", settleExchangeMarket);
+  document.querySelectorAll("[data-cashout-position]").forEach((button) => {
+    button.addEventListener("click", cashOutExchangePosition);
+  });
   bindCancelOrderButtons();
 }
 
@@ -2432,6 +2460,10 @@ function renderSettlement() {
       ${renderOpenOrders((portfolio?.openOrders || []).filter((order) => order.marketId === market.id))}
     </section>
     <section class="exchange-section">
+      <h3>${escapeHtml(accountLabel)} Open Positions</h3>
+      ${renderOpenPositions(portfolio?.openPositions || [], market.id)}
+    </section>
+    <section class="exchange-section">
       <h3>Matched Trades</h3>
       ${renderTradeRows(book.trades || [])}
     </section>
@@ -2480,12 +2512,12 @@ function renderTradeTicketOverlay() {
   const book = state.exchangeOrderBook?.marketId === market.id ? state.exchangeOrderBook : { back: [], lay: [], trades: [] };
   const ticket = state.exchangeTicket;
   const orderType = ticket.orderType || "limit";
-  const exposure = tradeExposure(ticket.side, ticket.odds, ticket.stake);
+  const exposure = tradeExposure(ticket.side, ticket.odds, ticket.stake, orderType);
   const accountLabel = state.exchangeUserId === "trader-a" ? "Trader A" : "Trader B";
   const lastMove = stats.lastDelta;
   const placeVerb = orderType === "market" ? "Market" : ticket.side === "back" ? "Back" : "Lay";
   const orderTypeHelp = orderType === "market"
-    ? "Crosses the best available opposite-side liquidity immediately. Unfilled size does not rest."
+    ? "Queued without a selected price. It fills automatically when opposite liquidity appears, at the available limit price."
     : "Posts at your selected odds and rests unmatched size in the open order book.";
 
   els.tradeTicketOverlay.innerHTML = `
@@ -2527,10 +2559,17 @@ function renderTradeTicketOverlay() {
             <button class="terminal-button ${ticket.side === "lay" ? "active lay" : ""}" type="button" id="exchangeLay">Lay</button>
           </div>
           <div class="trade-input-grid">
-            <label>
-              <span>Odds</span>
-              <input id="exchangeOdds" type="number" min="1.01" step="0.001" value="${escapeHtml(ticket.odds)}">
-            </label>
+            ${orderType === "limit" ? `
+              <label>
+                <span>Odds</span>
+                <input id="exchangeOdds" type="number" min="1.01" step="0.001" value="${escapeHtml(ticket.odds)}">
+              </label>
+            ` : `
+              <div class="trade-readonly-field">
+                <span>Execution Price</span>
+                <strong>Market</strong>
+              </div>
+            `}
             <label>
               <span>Stake</span>
               <input id="exchangeStake" type="number" min="1" step="1" value="${escapeHtml(ticket.stake)}">
@@ -2552,7 +2591,12 @@ function renderTradeTicketOverlay() {
         <section class="trade-ticket-panel trade-chart-panel">
           <div class="trade-ticket-section-head">
             <span class="eyebrow">Price Context</span>
+            <strong>${escapeHtml(timeLabel(stats.latest?.ts || market.priceTs || ""))}</strong>
+          </div>
+          <div class="trade-price-quote">
+            <span>Current Price</span>
             <strong>${preciseOdds(market.currentOddsDecimal)}</strong>
+            <small class="${valueClass(lastMove)}">${signedDecimal(lastMove)} last tick</small>
           </div>
           <div class="metric-grid trade-stat-grid">
             <div class="metric"><span>Implied</span><strong>${pct(market.impliedProbability)}</strong></div>
@@ -2583,6 +2627,10 @@ function renderTradeTicketOverlay() {
           <section class="exchange-section">
             <h3>${escapeHtml(accountLabel)} Open Orders</h3>
             ${renderOpenOrders((portfolio?.openOrders || []).filter((order) => order.marketId === market.id))}
+          </section>
+          <section class="exchange-section">
+            <h3>${escapeHtml(accountLabel)} Open Positions</h3>
+            ${renderOpenPositions(portfolio?.openPositions || [], market.id)}
           </section>
           <section class="exchange-section">
             <h3>Matched Trades</h3>

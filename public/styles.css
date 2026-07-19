@@ -622,6 +622,49 @@ select {
   overflow-wrap: anywhere;
 }
 
+.wager-hero-quote {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(120px, 0.65fr);
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.wager-hero-quote > div {
+  min-width: 0;
+  border: 1px solid rgba(52, 211, 153, 0.58);
+  background:
+    linear-gradient(180deg, rgba(52, 211, 153, 0.13), rgba(52, 211, 153, 0.035)),
+    #07100d;
+  padding: 12px;
+}
+
+.wager-hero-quote span {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.wager-hero-quote strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--green);
+  font-size: 52px;
+  line-height: 0.95;
+  font-weight: 900;
+  overflow-wrap: anywhere;
+}
+
+.wager-hero-quote > div:last-child {
+  border-color: var(--line);
+  background: #0a0f14;
+}
+
+.wager-hero-quote > div:last-child strong {
+  font-size: 28px;
+  line-height: 1.05;
+}
+
 .wager-stat-grid {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
@@ -771,7 +814,7 @@ select {
 .wager-card {
   min-width: 0;
   display: grid;
-  grid-template-rows: auto auto 78px auto;
+  grid-template-rows: auto auto auto 78px auto;
   gap: 8px;
   border: 1px solid rgba(63, 75, 88, 0.78);
   background: #0a0f14;
@@ -825,9 +868,35 @@ select {
   text-transform: uppercase;
 }
 
+.wager-price-strip {
+  min-width: 0;
+  border: 1px solid rgba(52, 211, 153, 0.58);
+  background:
+    linear-gradient(180deg, rgba(52, 211, 153, 0.12), rgba(52, 211, 153, 0.035)),
+    #07100d;
+  padding: 8px;
+}
+
+.wager-price-strip span {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.wager-price-strip strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--green);
+  font-size: 34px;
+  line-height: 0.95;
+  font-weight: 900;
+  overflow-wrap: anywhere;
+}
+
 .wager-quote-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
 }
 
@@ -1319,12 +1388,63 @@ select {
   font-weight: 800;
 }
 
+.trade-readonly-field {
+  min-height: 44px;
+  display: grid;
+  gap: 5px;
+  border: 1px solid var(--line-strong);
+  background: #0b1218;
+  padding: 7px 10px;
+}
+
+.trade-readonly-field span {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.trade-readonly-field strong {
+  color: var(--cyan);
+  font-size: 18px;
+}
+
 .place-order-button {
   min-height: 48px;
 }
 
 .trade-chart-panel {
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+}
+
+.trade-price-quote {
+  min-width: 0;
+  border: 1px solid rgba(52, 211, 153, 0.58);
+  background:
+    linear-gradient(180deg, rgba(52, 211, 153, 0.13), rgba(52, 211, 153, 0.035)),
+    #07100d;
+  padding: 12px;
+}
+
+.trade-price-quote span,
+.trade-price-quote small {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.trade-price-quote strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--green);
+  font-size: 58px;
+  line-height: 0.95;
+  font-weight: 900;
+  overflow-wrap: anywhere;
+}
+
+.trade-price-quote small {
+  margin-top: 6px;
 }
 
 .trade-stat-grid {
@@ -1536,6 +1656,15 @@ a {
 
   .wager-stat-grid {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .wager-hero-quote {
+    grid-template-columns: 1fr;
+  }
+
+  .wager-hero-quote strong,
+  .trade-price-quote strong {
+    font-size: 42px;
   }
 
   .wager-page-chart svg {

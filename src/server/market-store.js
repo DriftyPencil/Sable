@@ -49,6 +49,11 @@ function exposureFor(side = "back", odds = 0, stake = 0) {
   return roundMoney(side === "lay" ? size * Math.max(price - 1, 0) : size);
 }
 
+function orderExposureFor(order = {}, stake = order.unmatched) {
+  if (order.orderType === "market") return roundMoney(stake);
+  return exposureFor(order.side, order.odds, stake);
+}
+
 function opposingSide(side = "back") {
   return side === "back" ? "lay" : "back";
 }
@@ -96,6 +101,10 @@ function compactBook(marketId = "") {
 
 function sortBookSide(side = "back", bookOrders = []) {
   return [...bookOrders].sort((left, right) => {
+    const leftMarket = left.orderType === "market" ? 0 : 1;
+    const rightMarket = right.orderType === "market" ? 0 : 1;
+
+    if (leftMarket !== rightMarket) return leftMarket - rightMarket;
     if (side === "back") return right.odds - left.odds || left.createdAt.localeCompare(right.createdAt);
     return left.odds - right.odds || left.createdAt.localeCompare(right.createdAt);
   });
@@ -238,29 +247,6 @@ function marketOrderCandidates(marketId = "", outcome = "", side = "back") {
   return sortBookSide(opposite, candidates);
 }
 
-function availableMarketStake(marketId = "", outcome = "", side = "back", userId = "") {
-  return marketOrderCandidates(marketId, outcome, side)
-    .filter((order) => order.userId !== userId)
-    .reduce((sum, order) => roundMoney(sum + order.unmatched), 0);
-}
-
-function worstMarketExposure(marketId = "", outcome = "", side = "back", stake = 0, userId = "") {
-  const candidates = marketOrderCandidates(marketId, outcome, side).filter((order) => order.userId !== userId);
-  let remaining = Number(stake);
-  let exposure = 0;
-
-  for (const order of candidates) {
-    const matchedStake = Math.min(remaining, order.unmatched);
-
-    exposure = roundMoney(exposure + exposureFor(side, order.odds, matchedStake));
-    remaining = roundMoney(remaining - matchedStake);
-
-    if (remaining <= EPSILON) break;
-  }
-
-  return exposure;
-}
-
 export function placeMarketOrder(order = {}) {
   const userId = normalizeId(order.userId, "demo-user");
   const marketId = normalizeId(order.marketId);
@@ -268,8 +254,8 @@ export function placeMarketOrder(order = {}) {
   const side = normalizeSide(order.side);
   const stake = assertPositiveAmount(order.stake, "stake");
   const user = getOrCreateUser(userId);
-  const availableStake = availableMarketStake(marketId, outcome, side, userId);
-  const exposure = worstMarketExposure(marketId, outcome, side, stake, userId);
+  const exposure = roundMoney(stake);
+  const book = getOrderBook(marketId);
   const record = {
     id: `ord_${randomUUID()}`,
     userId,
@@ -285,7 +271,6 @@ export function placeMarketOrder(order = {}) {
     status: "open",
     createdAt: nowIso()
   };
-  const newTrades = [];
 
   if (!marketId) {
     throwPublicError(400, "missing_market_id", "marketId is required.");
@@ -295,58 +280,14 @@ export function placeMarketOrder(order = {}) {
     throwPublicError(400, "missing_outcome", "outcome is required.");
   }
 
-  if (availableStake <= EPSILON) {
-    throwPublicError(400, "no_liquidity", "No opposite-side liquidity is available for a market order.");
-  }
-
   if (user.balance + EPSILON < exposure) {
     throwPublicError(400, "insufficient_balance", "User has insufficient simulated balance for this market order.");
   }
 
+  user.balance = roundMoney(user.balance - exposure);
   orders.set(record.id, record);
-
-  for (const restingOrder of marketOrderCandidates(marketId, outcome, side)) {
-    const differentUsers = restingOrder.userId !== userId;
-    const canMatch = differentUsers && record.unmatched > EPSILON && restingOrder.unmatched > EPSILON;
-
-    if (!canMatch) continue;
-
-    const matchedStake = roundMoney(Math.min(record.unmatched, restingOrder.unmatched));
-    const executionOdds = restingOrder.odds;
-    const matchedExposure = exposureFor(side, executionOdds, matchedStake);
-    const trade = {
-      id: `trd_${randomUUID()}`,
-      marketId,
-      backOrderId: side === "back" ? record.id : restingOrder.id,
-      layOrderId: side === "lay" ? record.id : restingOrder.id,
-      backUserId: side === "back" ? userId : restingOrder.userId,
-      layUserId: side === "lay" ? userId : restingOrder.userId,
-      outcome,
-      odds: executionOdds,
-      stake: matchedStake,
-      status: "open",
-      createdAt: nowIso()
-    };
-
-    user.balance = roundMoney(user.balance - matchedExposure);
-    record.matched = roundMoney(record.matched + matchedStake);
-    record.unmatched = roundMoney(record.unmatched - matchedStake);
-    restingOrder.matched = roundMoney(restingOrder.matched + matchedStake);
-    restingOrder.unmatched = roundMoney(restingOrder.unmatched - matchedStake);
-    updateOrderStatus(restingOrder);
-    trades.set(trade.id, trade);
-    newTrades.push(trade);
-
-    if (record.unmatched <= EPSILON) break;
-  }
-
-  record.unmatched = roundMoney(record.unmatched);
-  record.status = record.matched <= EPSILON
-    ? "unfilled"
-    : record.unmatched > EPSILON
-      ? "partially_filled"
-      : "filled";
-  compactBook(marketId);
+  book[side].push(record);
+  const newTrades = matchOrders(marketId);
 
   return {
     order: orderView(record),
@@ -372,7 +313,7 @@ export function cancelOrder(orderId = "", userId = "demo-user") {
     throwPublicError(400, "order_not_cancelable", "Only unmatched open order size can be cancelled.");
   }
 
-  const refund = exposureFor(order.side, order.odds, order.unmatched);
+  const refund = orderExposureFor(order);
 
   user.balance = roundMoney(user.balance + refund);
   order.unmatched = 0;
@@ -451,12 +392,21 @@ export function matchOrders(marketId = "") {
     for (const lay of lays) {
       const sameOutcome = back.outcome === lay.outcome;
       const differentUsers = back.userId !== lay.userId;
-      const agreeableOdds = back.odds + EPSILON >= lay.odds;
-      const canMatch = sameOutcome && differentUsers && agreeableOdds && lay.unmatched > EPSILON && back.unmatched > EPSILON;
+      const hasExecutablePrice = back.orderType !== "market" || lay.orderType !== "market";
+      const agreeableOdds = back.orderType === "market" ||
+        lay.orderType === "market" ||
+        back.odds + EPSILON >= lay.odds;
+      const canMatch = sameOutcome &&
+        differentUsers &&
+        hasExecutablePrice &&
+        agreeableOdds &&
+        lay.unmatched > EPSILON &&
+        back.unmatched > EPSILON;
 
       if (!canMatch) continue;
 
       const matchedStake = roundMoney(Math.min(back.unmatched, lay.unmatched));
+      const executionOdds = lay.orderType === "limit" ? lay.odds : back.odds;
       const trade = {
         id: `trd_${randomUUID()}`,
         marketId,
@@ -465,7 +415,7 @@ export function matchOrders(marketId = "") {
         backUserId: back.userId,
         layUserId: lay.userId,
         outcome: back.outcome,
-        odds: lay.odds,
+        odds: executionOdds,
         stake: matchedStake,
         status: "open",
         createdAt: nowIso()
@@ -540,7 +490,7 @@ export function settleMarket(marketId = "", winningOutcome = "", txlinePayload =
 
   for (const order of marketOrders) {
     if (order.unmatched > EPSILON) {
-      const refund = exposureFor(order.side, order.odds, order.unmatched);
+      const refund = orderExposureFor(order);
       const user = getOrCreateUser(order.userId);
 
       user.balance = roundMoney(user.balance + refund);
@@ -577,6 +527,44 @@ export function getUserPortfolio(userId = "demo-user") {
   const openOrders = userOrders
     .filter((order) => ["open", "partially_matched"].includes(order.status))
     .map(orderView);
+  const openTrades = [...trades.values()]
+    .filter((trade) => trade.status === "open" && (trade.backUserId === user.id || trade.layUserId === user.id))
+    .map(tradeView);
+  const openPositionsByKey = new Map();
+
+  for (const trade of openTrades) {
+    const side = trade.backUserId === user.id ? "back" : "lay";
+    const signedStake = side === "back" ? trade.stake : -trade.stake;
+    const key = `${trade.marketId}|${trade.outcome}`;
+    const position = openPositionsByKey.get(key) || {
+      marketId: trade.marketId,
+      outcome: trade.outcome,
+      netStake: 0,
+      weightedOdds: 0,
+      side: "flat",
+      tradeCount: 0
+    };
+
+    position.netStake = roundMoney(position.netStake + signedStake);
+    position.weightedOdds = roundMoney(position.weightedOdds + trade.odds * Math.abs(trade.stake));
+    position.tradeCount += 1;
+    openPositionsByKey.set(key, position);
+  }
+
+  const openPositions = [...openPositionsByKey.values()]
+    .map((position) => {
+      const absoluteStake = roundMoney(Math.abs(position.netStake));
+
+      return {
+        marketId: position.marketId,
+        outcome: position.outcome,
+        side: position.netStake > EPSILON ? "back" : position.netStake < -EPSILON ? "lay" : "flat",
+        netStake: absoluteStake,
+        averageOdds: absoluteStake > EPSILON ? roundMoney(position.weightedOdds / absoluteStake) : 0,
+        tradeCount: position.tradeCount
+      };
+    })
+    .filter((position) => position.netStake > EPSILON);
   const settledTrades = [...trades.values()]
     .filter((trade) => trade.status === "settled" && (trade.backUserId === user.id || trade.layUserId === user.id))
     .map(tradeView);
@@ -584,6 +572,8 @@ export function getUserPortfolio(userId = "demo-user") {
   return {
     user: { ...user },
     openOrders,
+    openTrades,
+    openPositions,
     settledTrades,
     pnl: user.pnl
   };
@@ -595,9 +585,10 @@ export function getMarketOrderBook(marketId = "") {
     const grouped = new Map();
 
     for (const order of book[side].filter((item) => item.unmatched > EPSILON)) {
-      const key = `${order.outcome}|${order.odds}`;
+      const key = `${order.outcome}|${order.orderType || "limit"}|${order.odds}`;
       const group = grouped.get(key) || {
         outcome: order.outcome,
+        orderType: order.orderType || "limit",
         odds: order.odds,
         totalStake: 0,
         orders: []
