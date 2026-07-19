@@ -1,5 +1,7 @@
 const state = {
   mode: "live",
+  screen: "dashboard",
+  routeMarketId: "",
   fixtureKey: "",
   fixtures: [],
   source: null,
@@ -9,6 +11,8 @@ const state = {
   match: null,
   markets: new Map(),
   oddsHistory: new Map(),
+  recentLiveMarketIds: new Map(),
+  liveTickClearTimer: null,
   alerts: [],
   receipts: new Map(),
   selectedMarketId: null,
@@ -18,11 +22,18 @@ const state = {
   historyLoading: false,
   drawerOpen: false,
   activePane: "match",
-  commandLog: [
-    { kind: "out", text: "Ready. Live TxODDS mode is active. Select a fixture, then use ODDS, STEAM, PROOF, or SETTLE." }
-  ],
-  settlement: null,
-  wallet: ""
+  exchangeUserId: "trader-a",
+  exchangePortfolio: null,
+  exchangeOrderBook: null,
+  exchangeTicket: {
+    marketId: "",
+    side: "back",
+    stake: 25,
+    odds: 2
+  },
+  exchangeNotice: "",
+  exchangeBusy: false,
+  tradeTicketOpen: false
 };
 
 const els = {};
@@ -33,6 +44,13 @@ function qs(selector) {
 
 function money(value) {
   return `$${Number(value || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+}
+
+function usdc(value) {
+  return `${Number(value || 0).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  })} USDC`;
 }
 
 function pct(value) {
@@ -54,6 +72,14 @@ function bps(value) {
   if (!Number.isFinite(value)) return "0 bps";
   const sign = value > 0 ? "+" : "";
   return `${sign}${Math.round(value)} bps`;
+}
+
+function signedDecimal(value = 0) {
+  const number = Number(value);
+  const sign = number > 0 ? "+" : "";
+
+  if (!Number.isFinite(number) || number === 0) return "0.000";
+  return `${sign}${number.toFixed(3)}`;
 }
 
 function implied(decimal) {
@@ -80,6 +106,27 @@ function clockLabel(clock) {
   return `${clock.minute}${extra}' ${clock.period}`;
 }
 
+function timeLabel(value = "") {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "--";
+
+  return date.toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function titleCase(value = "") {
+  return String(value)
+    .replaceAll("_", " ")
+    .replaceAll("-", " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => `${word.charAt(0).toUpperCase()}${word.slice(1).toLowerCase()}`)
+    .join(" ");
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -101,6 +148,46 @@ function getFixtureRecord(key = state.fixtureKey) {
 
 function activeFixtureId() {
   return state.match?.fixtureId || getFixtureRecord()?.metadata?.fixtureId || "";
+}
+
+function liveTickVisibleMs() {
+  return 8000;
+}
+
+function isRecentLiveMarket(marketId = "") {
+  const updatedAt = state.recentLiveMarketIds.get(marketId) || 0;
+  return updatedAt > 0 && Date.now() - updatedAt < liveTickVisibleMs();
+}
+
+function clearLiveTickTimer() {
+  const timer = state.liveTickClearTimer;
+
+  if (timer) window.clearTimeout(timer);
+  state.liveTickClearTimer = null;
+}
+
+function pruneRecentLiveMarkets() {
+  const now = Date.now();
+
+  for (const [marketId, updatedAt] of state.recentLiveMarketIds) {
+    if (now - updatedAt > liveTickVisibleMs()) {
+      state.recentLiveMarketIds.delete(marketId);
+    }
+  }
+}
+
+function resetRecentLiveMarkets() {
+  clearLiveTickTimer();
+  state.recentLiveMarketIds = new Map();
+}
+
+function scheduleLiveTickClear() {
+  clearLiveTickTimer();
+  state.liveTickClearTimer = window.setTimeout(() => {
+    pruneRecentLiveMarkets();
+    state.liveTickClearTimer = null;
+    renderOdds();
+  }, liveTickVisibleMs() + 50);
 }
 
 function scoreValue(score, side) {
@@ -126,9 +213,85 @@ function fixtureOptionLabel(fixture) {
   const sportPrefix = rawSport && rawSport !== "Unknown" ? `${rawSport} · ` : "";
   const label = fixture.metadata.label || "Fixture";
   const start = fixtureStartLabel(fixture.metadata.startTime);
-  const fixtureId = fixture.metadata.fixtureId || "";
 
-  return `${sportPrefix}${label} · ${start} · #${fixtureId}`;
+  return `${sportPrefix}${label} · ${start}`;
+}
+
+function displaySport(value = "") {
+  const sport = String(value || "").trim();
+
+  return sport && sport !== "Unknown" ? sport : "Not supplied";
+}
+
+function selectedMarketHash(marketId = state.selectedMarketId) {
+  return marketId ? `#/wager/${encodeURIComponent(marketId)}` : "#/dashboard";
+}
+
+function currentRoute() {
+  const rawHash = window.location.hash.replace(/^#\/?/, "");
+  const [screen = "dashboard", ...rest] = rawHash.split("/");
+  const encodedMarketId = rest.join("/");
+  const marketId = encodedMarketId ? decodeURIComponent(encodedMarketId) : "";
+
+  return {
+    screen: screen === "wager" ? "wager" : "dashboard",
+    marketId
+  };
+}
+
+function applyRouteFromHash() {
+  const route = currentRoute();
+
+  state.screen = route.screen;
+  state.routeMarketId = route.marketId;
+
+  if (route.screen === "wager" && route.marketId) {
+    state.selectedMarketId = route.marketId;
+  }
+
+  if (route.screen === "wager" && !state.selectedMarketId && state.markets.size) {
+    state.selectedMarketId = sortedMarkets()[0]?.id || null;
+  }
+
+  renderAll();
+
+  if (state.screen === "wager" && state.selectedMarketId) {
+    hydrateMarketOrderBook(state.selectedMarketId);
+  }
+}
+
+function navigateToDashboard() {
+  if (window.location.hash === "#/dashboard" || window.location.hash === "") {
+    applyRouteFromHash();
+    return;
+  }
+
+  window.location.hash = "#/dashboard";
+}
+
+function navigateToWager(marketId = state.selectedMarketId) {
+  if (!marketId) return;
+  state.selectedMarketId = marketId;
+
+  const nextHash = selectedMarketHash(marketId);
+
+  if (window.location.hash === nextHash) {
+    applyRouteFromHash();
+    return;
+  }
+
+  window.location.hash = nextHash;
+}
+
+function syncWagerRoute() {
+  if (state.screen !== "wager" || !state.selectedMarketId) return;
+
+  const nextHash = selectedMarketHash(state.selectedMarketId);
+
+  state.routeMarketId = state.selectedMarketId;
+  if (window.location.hash !== nextHash) {
+    window.history.replaceState(null, "", nextHash);
+  }
 }
 
 function setActivePane(pane) {
@@ -139,6 +302,10 @@ function setActivePane(pane) {
 }
 
 async function init() {
+  els.dashboardScreen = qs("#dashboardScreen");
+  els.wagerScreen = qs("#wagerScreen");
+  els.dashboardNav = qs("#dashboardNav");
+  els.wagerNav = qs("#wagerNav");
   els.statusBar = qs("#statusBar");
   els.fixtureSelect = qs("#fixtureSelect");
   els.matchTape = qs("#matchTape");
@@ -149,47 +316,93 @@ async function init() {
   els.oddsChart = qs("#oddsChart");
   els.chartMarketLabel = qs("#chartMarketLabel");
   els.settlementConsole = qs("#settlementConsole");
-  els.commandForm = qs("#commandForm");
-  els.commandInput = qs("#commandInput");
-  els.commandHistory = qs("#commandHistory");
+  els.tradeTicketOverlay = qs("#tradeTicketOverlay");
   els.receiptDrawer = qs("#receiptDrawer");
+  els.backToDashboard = qs("#backToDashboard");
+  els.wagerTradeShortcut = qs("#wagerTradeShortcut");
+  els.wagerPageTitle = qs("#wagerPageTitle");
+  els.wagerPageChartTitle = qs("#wagerPageChartTitle");
+  els.wagerPageSummary = qs("#wagerPageSummary");
+  els.wagerPageChart = qs("#wagerPageChart");
+  els.wagerPageHistory = qs("#wagerPageHistory");
+  els.wagerHistoryCount = qs("#wagerHistoryCount");
+  els.wagerGroupCode = qs("#wagerGroupCode");
+  els.wagerPageRelated = qs("#wagerPageRelated");
+  els.wagerPageExchange = qs("#wagerPageExchange");
 
   bindEvents();
   await hydrateLiveFixtures();
+  await hydrateExchange();
   connectStream();
+  applyRouteFromHash();
   renderAll();
 }
 
 function bindEvents() {
+  els.dashboardNav.addEventListener("click", navigateToDashboard);
+  els.wagerNav.addEventListener("click", () => navigateToWager());
+  els.backToDashboard.addEventListener("click", navigateToDashboard);
+  els.wagerTradeShortcut.addEventListener("click", openExchangeTicketFromWagerPage);
   els.fixtureSelect.addEventListener("change", async () => {
-    state.fixtureKey = els.fixtureSelect.value;
-    applyFixture(getFixtureRecord());
-    await hydrateLiveScore(getFixtureRecord());
-    await hydrateLiveOdds(getFixtureRecord());
-    connectStream();
-  });
-  els.commandForm.addEventListener("submit", (event) => {
-    event.preventDefault();
-    submitCommand();
-  });
-  els.commandInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      submitCommand();
-    }
+    await selectFixture(getFixtureRecord());
   });
   els.oddsMonitor.addEventListener("click", (event) => {
+    const chartButton = event.target.closest("[data-open-market-id]");
+    const tradeButton = event.target.closest("[data-trade-market-id]");
+
+    if (chartButton) {
+      navigateToWager(chartButton.dataset.openMarketId);
+      return;
+    }
+
+    if (tradeButton) {
+      state.selectedMarketId = tradeButton.dataset.tradeMarketId;
+      openExchangeTicket();
+      return;
+    }
+
     const row = event.target.closest("[data-market-id]");
     if (!row) return;
     state.selectedMarketId = row.dataset.marketId;
     setActivePane("odds");
     renderAll();
+    hydrateMarketOrderBook();
   });
-  document.addEventListener("keydown", (event) => {
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-      event.preventDefault();
-      els.commandInput.focus();
+  els.wagerPageRelated.addEventListener("click", (event) => {
+    const relatedButton = event.target.closest("[data-related-market-id]");
+
+    if (!relatedButton) return;
+
+    navigateToWager(relatedButton.dataset.relatedMarketId);
+  });
+  els.wagerPageExchange.addEventListener("click", (event) => {
+    const actionButton = event.target.closest("[data-wager-action]");
+
+    if (!actionButton) return;
+
+    if (actionButton.dataset.wagerAction === "trade") {
+      openExchangeTicketFromWagerPage();
     }
+
+    if (actionButton.dataset.wagerAction === "proof") {
+      openReceipt(state.selectedMarketId);
+    }
+  });
+  els.tradeTicketOverlay.addEventListener("click", (event) => {
+    const closeButton = event.target.closest("[data-close-trade-ticket]");
+
+    if (closeButton || event.target === els.tradeTicketOverlay) {
+      closeTradeTicket();
+    }
+  });
+  window.addEventListener("hashchange", applyRouteFromHash);
+  window.addEventListener("popstate", applyRouteFromHash);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.tradeTicketOpen) {
+      closeTradeTicket();
+      return;
+    }
+
     if (event.key === "Escape" && state.drawerOpen) {
       closeReceiptDrawer();
     }
@@ -206,12 +419,28 @@ function applyFixture(record) {
   };
   state.markets = new Map(record.markets.map((market) => [market.id, { ...market }]));
   state.oddsHistory = new Map();
+  resetRecentLiveMarkets();
   state.receipts = new Map();
   state.alerts = [];
   state.events = [];
-  state.settlement = null;
   state.marketNotice = "";
   state.selectedMarketId = record.markets[0]?.id || null;
+}
+
+async function selectFixture(record) {
+  if (!record) return false;
+
+  state.fixtureKey = record.id;
+  els.fixtureSelect.value = record.id;
+  applyFixture(record);
+  renderAll();
+
+  await hydrateLiveScore(record);
+  await hydrateLiveOdds(record);
+  syncWagerRoute();
+  connectStream();
+
+  return true;
 }
 
 function connectStream() {
@@ -224,8 +453,8 @@ function connectStream() {
 
   state.events = [];
   state.alerts = [];
+  resetRecentLiveMarkets();
   state.receipts = new Map();
-  state.settlement = null;
   state.connected = false;
   state.lastEventAt = null;
   renderAll();
@@ -263,7 +492,6 @@ function connectStream() {
       reduceRawLiveEvent(data);
     } catch {
       log("out", "Live stream message received.");
-      renderCommandHistory();
     }
   };
 
@@ -326,9 +554,16 @@ function reduceMatchEvent(event) {
 
   if (state.match) {
     if (event.teams?.home && event.teams.home !== "Participant 1") state.match.teams = event.teams;
-    state.match.scoreStatus = event.scoreStatus || state.match.scoreStatus;
+    state.match.scoreStatus = event.scoreStatus === "available" || !state.match.score
+      ? event.scoreStatus || state.match.scoreStatus
+      : state.match.scoreStatus;
     state.match.score = event.score || state.match.score;
     state.match.clock = event.matchClock || state.match.clock;
+  }
+
+  if (state.events.some((item) => item.id === event.id && item.type === event.type)) {
+    renderStatus();
+    return;
   }
 
   state.events.unshift(event);
@@ -353,6 +588,10 @@ function reduceMatchEvent(event) {
 }
 
 function applyOddsTick(event) {
+  const isBootstrap = event.txlineEventName === "odds_bootstrap";
+  const liveUpdatedAt = Date.now();
+  const updatedSelections = [];
+
   for (const rawQuote of event.payload.markets || []) {
     const quote = normalizeIncomingMarketQuote(rawQuote, event.fixtureId);
     const existingMarket = state.markets.get(quote.id) || {
@@ -388,6 +627,34 @@ function applyOddsTick(event) {
 
     appendOddsHistoryPoint(market, "stream");
 
+    if (!isBootstrap) {
+      const previousDecimal = previous ? Number(previous.decimal) : Number(existingMarket.currentOddsDecimal);
+      const currentDecimal = Number(market.currentOddsDecimal);
+      const priceDelta = Number.isFinite(previousDecimal) && Number.isFinite(currentDecimal)
+        ? currentDecimal - previousDecimal
+        : 0;
+
+      state.recentLiveMarketIds.set(market.id, liveUpdatedAt);
+
+      const updatedMarket = state.markets.get(market.id);
+
+      if (updatedMarket) {
+        state.markets.set(market.id, {
+          ...updatedMarket,
+          lastStreamAt: event.ts,
+          lastStreamSeq: event.seq
+        });
+      }
+
+      updatedSelections.push({
+        label: market.selection,
+        price: preciseOdds(currentDecimal),
+        previousPrice: previousDecimal > 0 ? preciseOdds(previousDecimal) : "",
+        delta: priceDelta,
+        direction: priceDelta > 0 ? "up" : priceDelta < 0 ? "down" : "flat"
+      });
+    }
+
     if (previous) {
       const latest = state.oddsHistory.get(quote.id)?.at(-1);
       const deltaBps = latest
@@ -410,6 +677,14 @@ function applyOddsTick(event) {
         state.alerts = state.alerts.slice(0, 20);
       }
     }
+  }
+
+  if (updatedSelections.length) {
+    event.payload.updatedSelections = updatedSelections;
+    event.payload.updatedMarketCount = updatedSelections.length;
+    event.payload.summary = updatedSelections.slice(0, 3).map(selectionMoveText).join(", ");
+    event.payload.summaryExtra = Math.max(0, updatedSelections.length - 3);
+    scheduleLiveTickClear();
   }
 }
 
@@ -450,36 +725,61 @@ async function hydrateLiveFixtures() {
 
 async function hydrateLiveOdds(record) {
   if (!record?.metadata?.fixtureId || !state.liveStatus?.liveReady) return;
+  const fixtureId = record.metadata.fixtureId;
   const markets = await fetchLiveOddsMarkets(record);
 
   state.markets = new Map();
   state.oddsHistory = new Map();
-  await hydrateLiveOddsHistory(record);
   seedOddsHistory(markets, "snapshot");
 
   if (!state.markets.size) {
     state.selectedMarketId = null;
-    state.marketNotice = `No TxODDS odds snapshot or update history is available for ${record.metadata.label}.`;
-    log("out", `No TxODDS odds data for ${record.metadata.label}.`);
-    return;
+    state.marketNotice = `Loading TxODDS price history for ${record.metadata.label}.`;
+  } else {
+    state.selectedMarketId = state.markets.has(state.selectedMarketId)
+      ? state.selectedMarketId
+      : sortedMarkets()[0]?.id || null;
+    state.marketNotice = "";
+    log("out", `Loaded ${state.markets.size} current TxODDS wager prices for ${record.metadata.label}.`);
   }
 
-  state.selectedMarketId = state.markets.has(state.selectedMarketId)
-    ? state.selectedMarketId
-    : [...state.markets.values()].sort((a, b) => String(a.sortKey || a.id).localeCompare(String(b.sortKey || b.id)))[0]?.id || null;
-  state.marketNotice = "";
-  log("out", `Loaded ${state.markets.size} real TxODDS wager histories for ${record.metadata.label}.`);
+  syncWagerRoute();
+  renderAll();
+  hydrateMarketOrderBook();
+  startOddsHistoryBackfill(record, fixtureId);
 }
 
-async function hydrateLiveOddsHistory(record) {
+function startOddsHistoryBackfill(record, fixtureId = "") {
+  state.historyBackfillFixtureId = fixtureId;
+  state.historyLoading = true;
+  log("out", `Loading TxODDS price history for ${record.metadata.label}.`);
+
+  hydrateLiveOddsHistory(record, fixtureId)
+    .catch((error) => {
+      if (state.historyBackfillFixtureId === fixtureId) {
+        log("out", `TxODDS price history failed: ${error instanceof Error ? error.message : String(error)}.`);
+        renderAll();
+      }
+    })
+    .finally(() => {
+      if (state.historyBackfillFixtureId === fixtureId) {
+        state.historyLoading = false;
+        renderAll();
+      }
+    });
+}
+
+async function hydrateLiveOddsHistory(record, fixtureId = record?.metadata?.fixtureId || "") {
   if (!record?.metadata?.fixtureId || !state.liveStatus?.liveReady) return;
 
-  const response = await fetch(`/api/txline/odds-history/${encodeURIComponent(record.metadata.fixtureId)}?hours=12`);
+  const response = await fetch(`/api/txline/odds-history/${encodeURIComponent(fixtureId)}?hours=12`);
 
   if (!response.ok) {
     log("out", `TxODDS odds history failed with ${response.status}. Live ticks will build history from here.`);
     return;
   }
+
+  if (state.historyBackfillFixtureId !== fixtureId || activeFixtureId() !== fixtureId) return;
 
   const payload = await response.json();
   const rawRows = Array.isArray(payload) ? payload : payload.rows;
@@ -487,9 +787,23 @@ async function hydrateLiveOddsHistory(record) {
 
   seedOddsHistory(historyMarkets, "history");
 
+  if (state.historyBackfillFixtureId !== fixtureId || activeFixtureId() !== fixtureId) return;
+
+  if (!state.selectedMarketId && state.markets.size) {
+    state.selectedMarketId = sortedMarkets()[0]?.id || null;
+  }
+
+  state.marketNotice = state.markets.size
+    ? ""
+    : `No TxODDS odds snapshot or update history is available for ${record.metadata.label}.`;
+
   if (historyMarkets.length) {
     log("out", `Backfilled ${historyMarkets.length} TxODDS historical price events.`);
+  } else {
+    log("out", `No TxODDS historical price events returned for ${record.metadata.label}.`);
   }
+
+  renderAll();
 }
 
 function seedOddsHistory(markets = [], source = "history") {
@@ -885,9 +1199,23 @@ function renderAll() {
   renderScanner();
   renderChart();
   renderSettlement();
-  renderCommandHistory();
+  renderWagerPage();
+  renderTradeTicketOverlay();
   renderReceiptDrawer();
+  renderScreens();
   setActivePane(state.activePane);
+}
+
+function renderScreens() {
+  const isWagerScreen = state.screen === "wager";
+  const selectedMarketExists = Boolean(state.selectedMarketId && state.markets.has(state.selectedMarketId));
+
+  els.dashboardScreen.hidden = isWagerScreen;
+  els.wagerScreen.hidden = !isWagerScreen;
+  els.dashboardNav.classList.toggle("active", !isWagerScreen);
+  els.wagerNav.classList.toggle("active", isWagerScreen);
+  els.wagerNav.disabled = !selectedMarketExists;
+  document.body.dataset.screen = state.screen;
 }
 
 function renderStatus() {
@@ -908,28 +1236,281 @@ function renderStatus() {
 
 function renderTape() {
   if (!state.events.length) {
-    els.matchTape.innerHTML = `<div class="empty-state">Waiting for TxLINE-shaped match events...</div>`;
+    els.matchTape.innerHTML = `<div class="empty-state">Waiting for TxODDS live scores and odds updates...</div>`;
     return;
   }
 
-  els.matchTape.innerHTML = state.events.map((event) => `
-    <article class="tape-row">
-      <span class="tape-meta">${escapeHtml(clockLabel(event.matchClock))}</span>
+  els.matchTape.innerHTML = state.events.map((event) => {
+    const item = wireItem(event);
+
+    return `
+    <article class="tape-row wire-row ${escapeHtml(item.tone)}">
+      <span class="tape-meta">${escapeHtml(item.time)}</span>
       <div>
         <div class="tape-headline">
-          <span class="type-${escapeHtml(event.type)}">${escapeHtml(event.type.toUpperCase())}</span>
-          <strong>${escapeHtml(eventHeadline(event))}</strong>
+          <span class="wire-badge ${escapeHtml(item.tone)}">${escapeHtml(item.badge)}</span>
+          <strong class="${escapeHtml(item.headlineClass || "")}">${escapeHtml(item.headline)}</strong>
         </div>
-        <div class="tape-sub">seq ${event.seq} / ${escapeHtml(event.source)}</div>
+        ${renderWireBody(item)}
+        <div class="tape-sub">${escapeHtml(item.meta)}</div>
       </div>
     </article>
-  `).join("");
+  `;
+  }).join("");
+}
+
+function rawEventAction(event = {}) {
+  const payload = event.payload || {};
+  return String(
+    payload.action ||
+    payload.Action ||
+    payload.status ||
+    payload.Status ||
+    payload.reason ||
+    payload.note ||
+    ""
+  ).trim();
+}
+
+function scoreLineLabel(event = {}) {
+  const score = event.score || {};
+  const teams = event.teams || state.match?.teams || {};
+  const homeScore = scoreValue(score, "home");
+  const awayScore = scoreValue(score, "away");
+
+  if (homeScore === "--" || awayScore === "--") return "";
+
+  return `${teams.home || "Home"} ${homeScore}-${awayScore} ${teams.away || "Away"}`;
+}
+
+function wireTimeLabel(event = {}) {
+  const clock = clockLabel(event.matchClock);
+
+  if (clock && clock !== "--" && clock !== "NS") return clock;
+
+  return timeLabel(event.ts) === "--" ? "Live" : timeLabel(event.ts);
+}
+
+function summarizeSelections(selections = [], limit = 3) {
+  const visible = selections.slice(0, limit);
+  const hiddenCount = Math.max(0, selections.length - visible.length);
+  const suffix = hiddenCount ? `, plus ${hiddenCount} more` : "";
+
+  return `${visible.map(selectionMoveText).join(", ")}${suffix}`;
+}
+
+function selectionMoveText(move = {}) {
+  if (typeof move === "string") return move;
+
+  const label = move.label || "Selection";
+  const price = move.price || "--";
+  const delta = Number(move.delta);
+  const moveText = Number.isFinite(delta) && delta !== 0
+    ? ` (${signedDecimal(delta)})`
+    : "";
+
+  return `${label} ${price}${moveText}`;
+}
+
+function selectionMoveClass(move = {}) {
+  if (move.direction === "up") return "move-up";
+  if (move.direction === "down") return "move-down";
+
+  return "move-flat";
+}
+
+function renderSelectionMovesHtml(selections = [], limit = 3) {
+  const visible = selections.slice(0, limit);
+  const hiddenCount = Math.max(0, selections.length - visible.length);
+  const spans = visible.map((move) => (
+    `<span class="wire-price-move ${escapeHtml(selectionMoveClass(move))}">${escapeHtml(selectionMoveText(move))}</span>`
+  ));
+  const suffix = hiddenCount ? ` <span class="muted">plus ${hiddenCount} more</span>` : "";
+
+  return `${spans.join('<span class="muted">, </span>')}${suffix}`;
+}
+
+function renderWireBody(item = {}) {
+  if (item.bodyHtml) return `<div class="tape-body">${item.bodyHtml}</div>`;
+  if (item.body) return `<div class="tape-body">${escapeHtml(item.body)}</div>`;
+
+  return "";
+}
+
+function wireMeta(event = {}, source = "TxODDS live feed") {
+  const parts = [source, timeLabel(event.ts)].filter((item) => item && item !== "--");
+
+  return parts.join(" · ");
+}
+
+function matchStatusWireItem(event = {}) {
+  const action = rawEventAction(event);
+  const normalizedAction = action.toLowerCase();
+
+  if (normalizedAction.includes("disconnect")) {
+    return {
+      badge: "Feed",
+      tone: "warn",
+      headline: "Score feed disconnected",
+      body: "Sable is waiting for the next TxODDS score update. Odds may still update separately.",
+      meta: wireMeta(event, "TxODDS score feed"),
+      time: wireTimeLabel(event)
+    };
+  }
+
+  if (normalizedAction.includes("connect")) {
+    return {
+      badge: "Feed",
+      tone: "good",
+      headline: "Score feed connected",
+      body: "Live score updates are available for this fixture.",
+      meta: wireMeta(event, "TxODDS score feed"),
+      time: wireTimeLabel(event)
+    };
+  }
+
+  if (normalizedAction.includes("final")) {
+    const scoreLine = scoreLineLabel(event);
+
+    return {
+      badge: "Final",
+      tone: "good",
+      headline: "Match finished",
+      body: scoreLine || "TxODDS marked this match as final.",
+      meta: wireMeta(event, "TxODDS score feed"),
+      time: wireTimeLabel(event)
+    };
+  }
+
+  return {
+    badge: "Match",
+    tone: "neutral",
+    headline: action ? titleCase(action) : "Match status updated",
+    body: scoreLineLabel(event) || "TxODDS published a match status update.",
+    meta: wireMeta(event, "TxODDS score feed"),
+    time: wireTimeLabel(event)
+  };
+}
+
+function oddsWireItem(event = {}) {
+  const isBootstrap = event.txlineEventName === "odds_bootstrap";
+  const selections = Array.isArray(event.payload?.updatedSelections)
+    ? event.payload.updatedSelections
+    : [];
+  const marketCount = Number(event.payload?.updatedMarketCount || event.payload?.markets?.length || 0);
+  const headline = selections.length === 1
+    ? `Odds updated: ${selectionMoveText(selections[0])}`
+    : selections.length > 1
+      ? `${selections.length} live prices updated`
+      : `${marketCount} current prices loaded`;
+
+  if (isBootstrap) {
+    return {
+      badge: "Odds",
+      tone: "neutral",
+      headline: "Current odds loaded",
+      body: marketCount
+        ? `Loaded ${marketCount} TxODDS prices for this fixture.`
+        : "TxODDS returned the current odds snapshot.",
+      meta: wireMeta(event, "TxODDS odds feed"),
+      time: wireTimeLabel(event)
+    };
+  }
+
+  return {
+    badge: "Odds",
+    tone: "live",
+    headline,
+    headlineClass: selections.length === 1 ? selectionMoveClass(selections[0]) : "",
+    body: selections.length ? "" : "A live TxODDS odds tick updated this fixture.",
+    bodyHtml: selections.length
+      ? `Latest prices: ${renderSelectionMovesHtml(selections)}.`
+      : "",
+    meta: wireMeta(event, "TxODDS odds feed"),
+    time: wireTimeLabel(event)
+  };
+}
+
+function wireItem(event = {}) {
+  if (event.type === "goal") {
+    const teams = event.teams || state.match?.teams || {};
+    const team = event.actor?.team === "home" ? teams.home : teams.away;
+    const player = event.actor?.playerName && event.actor.playerName !== "Unknown"
+      ? `Scorer: ${event.actor.playerName}. `
+      : "";
+
+    return {
+      badge: "Goal",
+      tone: "good",
+      headline: `${team || "Team"} scored`,
+      body: `${player}${scoreLineLabel(event) || "Score updated."}`,
+      meta: wireMeta(event, "TxODDS score feed"),
+      time: wireTimeLabel(event)
+    };
+  }
+
+  if (event.type === "card") {
+    const card = titleCase(event.payload?.card || "Card");
+    const player = event.actor?.playerName && event.actor.playerName !== "Unknown"
+      ? `Shown to ${event.actor.playerName}.`
+      : "Disciplinary event reported by TxODDS.";
+
+    return {
+      badge: "Card",
+      tone: "warn",
+      headline: `${card} shown`,
+      body: player,
+      meta: wireMeta(event, "TxODDS score feed"),
+      time: wireTimeLabel(event)
+    };
+  }
+
+  if (event.type === "var") {
+    return {
+      badge: "VAR",
+      tone: "warn",
+      headline: "VAR review updated",
+      body: [event.payload?.type, event.payload?.outcome].filter(Boolean).join(": ") || "VAR event reported by TxODDS.",
+      meta: wireMeta(event, "TxODDS score feed"),
+      time: wireTimeLabel(event)
+    };
+  }
+
+  if (event.type === "odds_tick") return oddsWireItem(event);
+  if (event.type === "match_status") return matchStatusWireItem(event);
+
+  if (event.type === "market_resolved") {
+    const market = state.markets.get(event.payload?.marketId);
+
+    return {
+      badge: "Result",
+      tone: "good",
+      headline: `${market?.selection || "Selected wager"} resolved`,
+      body: event.payload?.resolvedOutcome
+        ? `Outcome: ${event.payload.resolvedOutcome}. TxODDS proof is available.`
+        : "TxODDS resolution data is available.",
+      meta: wireMeta(event, "TxODDS validation"),
+      time: wireTimeLabel(event)
+    };
+  }
+
+  return {
+    badge: "Update",
+    tone: "neutral",
+    headline: eventHeadline(event),
+    body: "TxODDS published a live update for this fixture.",
+    meta: wireMeta(event),
+    time: wireTimeLabel(event)
+  };
 }
 
 function eventHeadline(event) {
   if (event.type === "goal") {
-    const team = event.actor?.team === "home" ? event.teams.home : event.teams.away;
-    return `${team} goal: ${event.actor?.playerName || "Unknown"} (${event.score.home}-${event.score.away})`;
+    const teams = event.teams || state.match?.teams || {};
+    const team = event.actor?.team === "home" ? teams.home : teams.away;
+    const scoreLine = scoreLineLabel(event);
+
+    return `${team || "Team"} goal${scoreLine ? ` (${scoreLine})` : ""}`;
   }
   if (event.type === "card") {
     return `${event.payload.card || "Card"} card: ${event.actor?.playerName || "Unknown"}`;
@@ -938,7 +1519,12 @@ function eventHeadline(event) {
     return `VAR ${event.payload.type || ""}: ${event.payload.outcome || ""}`;
   }
   if (event.type === "odds_tick") {
-    return `${event.payload.reason || "Odds tick"}: ${(event.payload.markets || []).length} markets`;
+    if (event.payload.summary) {
+      const suffix = event.payload.summaryExtra ? ` +${event.payload.summaryExtra} more` : "";
+      return `${event.payload.reason || "Odds tick"}: ${event.payload.summary}${suffix}`;
+    }
+
+    return `${event.payload.reason || "Odds tick"}: ${(event.payload.markets || []).length} prices`;
   }
   if (event.type === "market_resolved") {
     return `${event.payload.marketId} resolved to ${event.payload.resolvedOutcome}`;
@@ -954,6 +1540,11 @@ function renderMatchDetail() {
   const totalVolume = markets.reduce((sum, market) => sum + Number(market.volumeUsd || 0), 0);
   const latestEvent = state.events[0];
   const resolved = markets.filter((market) => market.status === "resolved").length;
+  const coverage = [
+    state.connected ? "Live stream" : "Stream idle",
+    markets.length ? "Odds available" : "Odds pending",
+    match.scoreStatus === "available" ? "Scores available" : "Scores pending"
+  ].join(" / ");
 
   els.matchDetail.innerHTML = `
     <div class="scoreboard">
@@ -977,16 +1568,16 @@ function renderMatchDetail() {
       <div class="metric"><span>Resolved</span><strong>${resolved}</strong></div>
     </div>
     <div class="metric-grid">
-      <div class="metric"><span>Fixture ID</span><strong>${escapeHtml(match.fixtureId)}</strong></div>
-      <div class="metric"><span>Sport</span><strong>${escapeHtml(match.sport || "Unknown")}</strong></div>
+      <div class="metric"><span>Sport</span><strong>${escapeHtml(displaySport(match.sport))}</strong></div>
       <div class="metric"><span>Competition</span><strong>${escapeHtml(match.competition)}</strong></div>
-      <div class="metric"><span>Latest Seq</span><strong>${latestEvent?.seq || "--"}</strong></div>
+      <div class="metric"><span>Coverage</span><strong>${escapeHtml(coverage)}</strong></div>
+      <div class="metric"><span>Last Update</span><strong>${escapeHtml(latestEvent ? wireTimeLabel(latestEvent) : "--")}</strong></div>
     </div>
   `;
 }
 
 function renderOdds() {
-  const markets = [...state.markets.values()].sort((a, b) => String(a.sortKey || a.id).localeCompare(String(b.sortKey || b.id)));
+  const markets = sortedMarkets();
   const groupedMarkets = groupMarkets(markets);
 
   if (!markets.length) {
@@ -1008,6 +1599,12 @@ function renderOdds() {
       </div>
     </section>
   `).join("");
+}
+
+function sortedMarkets() {
+  return [...state.markets.values()].sort((a, b) => (
+    String(a.sortKey || a.id).localeCompare(String(b.sortKey || b.id))
+  ));
 }
 
 function groupMarkets(markets = []) {
@@ -1036,17 +1633,27 @@ function renderWagerCard(market) {
     : 0;
   const deltaClass = probabilityDelta > 0 ? "positive" : probabilityDelta < 0 ? "negative" : "muted";
   const statusClass = market.status === "resolved" ? "good" : market.status === "open" ? "" : "warn";
+  const isLive = isRecentLiveMarket(market.id);
   const selectedClass = state.selectedMarketId === market.id ? "selected" : "";
+  const liveClass = isLive ? "live" : "";
+  const cardClass = ["wager-card", selectedClass, liveClass].filter(Boolean).join(" ");
+  const badgeClass = isLive ? "live" : statusClass;
+  const badgeText = isLive ? "live" : market.status;
+  const statusBadge = market.status === "open"
+    ? `<button class="badge trade-badge ${badgeClass}" type="button" data-trade-market-id="${escapeHtml(market.id)}">${escapeHtml(badgeText)}</button>`
+    : `<span class="badge ${badgeClass}">${escapeHtml(badgeText)}</span>`;
+  const moveLabel = isLive ? "LIVE TICK" : bps(probabilityDelta);
+  const moveClass = isLive ? "positive" : deltaClass;
   const lastUpdated = market.priceTs ? new Date(market.priceTs).toLocaleTimeString() : "--";
 
   return `
-    <article class="wager-card ${selectedClass}" data-market-id="${escapeHtml(market.id)}">
+    <article class="${cardClass}" data-market-id="${escapeHtml(market.id)}">
       <div class="wager-card-head">
         <div>
           <strong>${escapeHtml(market.selection)}</strong>
           <small>${escapeHtml(market.periodLabel || "Full Match")} / ${escapeHtml(market.marketCode || market.type)}</small>
         </div>
-        <span class="badge ${statusClass}">${escapeHtml(market.status)}</span>
+        ${statusBadge}
       </div>
       <div class="wager-quote-grid">
         <div>
@@ -1064,9 +1671,10 @@ function renderWagerCard(market) {
       </div>
       <div class="mini-chart">${renderMiniPriceChart(history)}</div>
       <div class="wager-card-foot">
-        <span class="${deltaClass}">${bps(probabilityDelta)}</span>
+        <span class="${moveClass}">${escapeHtml(moveLabel)}</span>
         <span>${history.length} ticks</span>
         <span>${escapeHtml(lastUpdated)}</span>
+        <button class="terminal-button chart-open-button" type="button" data-open-market-id="${escapeHtml(market.id)}">Chart</button>
       </div>
     </article>
   `;
@@ -1147,20 +1755,45 @@ function renderMiniPriceChart(history = []) {
 
 function renderScanner() {
   if (!state.alerts.length) {
-    els.marketScanner.innerHTML = `<div class="empty-state">No steam moves yet. The scanner trips at 650 bps on live odds displacement.</div>`;
+    els.marketScanner.innerHTML = `<div class="empty-state">No major market moves yet. Sable will flag a wager when live TxODDS prices move sharply.</div>`;
     return;
   }
 
-  els.marketScanner.innerHTML = state.alerts.map((alert) => `
+  els.marketScanner.innerHTML = state.alerts.map((alert) => {
+    const item = scannerItem(alert);
+
+    return `
     <article class="scanner-item">
       <div class="scanner-line">
-        <span class="badge ${alert.severity === "critical" ? "warn" : ""}">${escapeHtml(alert.kind)}</span>
-        <strong class="${alert.deltaProbabilityBps > 0 ? "positive" : "negative"}">${bps(alert.deltaProbabilityBps)}</strong>
+        <span class="badge ${alert.severity === "critical" ? "warn" : ""}">${escapeHtml(item.badge)}</span>
+        <strong class="${alert.deltaProbabilityBps > 0 ? "positive" : "negative"}">${escapeHtml(item.move)}</strong>
       </div>
-      <div class="scanner-message">${escapeHtml(alert.message)}</div>
-      <div class="scanner-context">market ${escapeHtml(alert.marketId)} / ${alert.windowSec}s window / ${new Date(alert.ts).toLocaleTimeString()}</div>
+      <div class="scanner-message">${escapeHtml(item.message)}</div>
+      <div class="scanner-context">${escapeHtml(item.context)}</div>
     </article>
-  `).join("");
+  `;
+  }).join("");
+}
+
+function pointMoveLabel(deltaBps = 0) {
+  const points = Number(deltaBps) / 100;
+  const sign = points > 0 ? "+" : "";
+
+  return `${sign}${points.toFixed(1)} pts`;
+}
+
+function scannerItem(alert = {}) {
+  const market = state.markets.get(alert.marketId);
+  const direction = alert.deltaProbabilityBps > 0 ? "increased" : "fell";
+  const selection = market?.selection || "Selected wager";
+  const group = market?.groupLabel || market?.label || "Market";
+
+  return {
+    badge: alert.kind === "steam_move" ? "Steam Move" : titleCase(alert.kind || "Alert"),
+    move: pointMoveLabel(alert.deltaProbabilityBps),
+    message: `${selection} implied probability ${direction} sharply.`,
+    context: `${group} · detected ${timeLabel(alert.ts)}`
+  };
 }
 
 function renderChart() {
@@ -1173,66 +1806,683 @@ function renderChart() {
     return;
   }
 
-  const width = 560;
-  const height = 190;
-  const pad = 20;
+  els.oddsChart.innerHTML = renderPriceChartSvg(history, {
+    width: 560,
+    height: 190,
+    pad: 20,
+    labelSize: 10
+  });
+}
+
+function renderPriceChartSvg(history = [], options = {}) {
+  const width = Number(options.width || 720);
+  const height = Number(options.height || 260);
+  const pad = Number(options.pad || 24);
+  const labelSize = Number(options.labelSize || 11);
   const points = priceChartPoints(history, width, height, pad);
-  const min = Math.min(...points.map((point) => point.min));
-  const max = Math.max(...points.map((point) => point.max));
+  const sorted = sortedPriceHistory(history);
+  const first = sorted[0];
+  const latest = sorted.at(-1);
+  const min = points.length ? Math.min(...points.map((point) => point.min)) : 0;
+  const max = points.length ? Math.max(...points.map((point) => point.max)) : 0;
   const line = stepPath(points, width, pad);
   const area = stepAreaPath(points, width, height, pad);
-  const tickLabel = history.length === 1 ? "1 event / last known" : `${history.length} events`;
+  const tickLabel = sorted.length === 1 ? "1 event / last known" : `${sorted.length} events`;
+  const firstTime = first ? timeLabel(first.ts) : "--";
+  const latestTime = latest ? timeLabel(latest.ts) : "--";
 
-  els.oddsChart.innerHTML = `
+  if (!points.length) return `<div class="empty-state">Awaiting TxODDS price history for this wager.</div>`;
+
+  return `
     <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Decimal price history chart">
       <line class="chart-grid" x1="${pad}" x2="${width - pad}" y1="${pad}" y2="${pad}"></line>
       <line class="chart-grid" x1="${pad}" x2="${width - pad}" y1="${height / 2}" y2="${height / 2}"></line>
       <line class="chart-grid" x1="${pad}" x2="${width - pad}" y1="${height - pad}" y2="${height - pad}"></line>
       <path class="chart-area" d="${area}"></path>
       <path class="chart-line" d="${line}"></path>
-      ${points.map((point) => `<circle class="chart-dot" cx="${point.x}" cy="${point.y}" r="4"></circle>`).join("")}
-      <text x="${pad}" y="16" fill="#8a98a9" font-size="10">${preciseOdds(max)}</text>
-      <text x="${pad}" y="${height - 6}" fill="#8a98a9" font-size="10">${preciseOdds(min)}</text>
-      <text x="${width - 155}" y="16" fill="#34d399" font-size="11">Last ${preciseOdds(history.at(-1).decimal)}</text>
-      <text x="${width - 155}" y="32" fill="#8a98a9" font-size="10">${escapeHtml(tickLabel)}</text>
+      ${points.map((point) => `<circle class="chart-dot" cx="${point.x}" cy="${point.y}" r="3.5"></circle>`).join("")}
+      <text x="${pad}" y="${pad - 6}" fill="#8a98a9" font-size="${labelSize}">${preciseOdds(max)}</text>
+      <text x="${pad}" y="${height - 7}" fill="#8a98a9" font-size="${labelSize}">${preciseOdds(min)}</text>
+      <text x="${width - 190}" y="${pad - 6}" fill="#34d399" font-size="${labelSize + 1}">Last ${preciseOdds(latest?.decimal)}</text>
+      <text x="${width - 190}" y="${pad + 11}" fill="#8a98a9" font-size="${labelSize}">${escapeHtml(tickLabel)}</text>
+      <text x="${pad}" y="${height - pad + 17}" fill="#8a98a9" font-size="${labelSize}">${escapeHtml(firstTime)}</text>
+      <text x="${width - pad - 48}" y="${height - pad + 17}" fill="#8a98a9" font-size="${labelSize}">${escapeHtml(latestTime)}</text>
     </svg>
   `;
 }
 
-function renderSettlement() {
+function priceHistoryStats(history = []) {
+  const sorted = sortedPriceHistory(history);
+  const first = sorted[0];
+  const latest = sorted.at(-1);
+  const previous = sorted.length > 1 ? sorted.at(-2) : first;
+  const values = sorted.map((point) => Number(point.decimal));
+  const min = values.length ? Math.min(...values) : 0;
+  const max = values.length ? Math.max(...values) : 0;
+  const delta = first && latest ? Number(latest.decimal) - Number(first.decimal) : 0;
+  const lastDelta = previous && latest ? Number(latest.decimal) - Number(previous.decimal) : 0;
+  const probabilityDeltaBps = first && latest
+    ? (Number(latest.impliedProbability) - Number(first.impliedProbability)) * 10000
+    : 0;
+
+  return {
+    first,
+    latest,
+    previous,
+    min,
+    max,
+    delta,
+    lastDelta,
+    probabilityDeltaBps,
+    count: sorted.length
+  };
+}
+
+function valueClass(value = 0) {
+  const number = Number(value);
+
+  if (number > 0) return "positive";
+  if (number < 0) return "negative";
+  return "muted";
+}
+
+function marketContextLabel(market = {}) {
+  return [
+    state.match?.label,
+    market.groupLabel,
+    market.periodLabel || "Full Match"
+  ].filter(Boolean).join(" / ");
+}
+
+function relatedMarkets(market = {}) {
+  return sortedMarkets().filter((item) => (
+    item.id !== market.id &&
+    item.groupLabel === market.groupLabel
+  ));
+}
+
+function renderWagerPage() {
   const market = state.markets.get(state.selectedMarketId);
-  const receipt = market ? state.receipts.get(market.id) : null;
-  const settlement = state.settlement;
+  const history = sortedPriceHistory(state.oddsHistory.get(state.selectedMarketId) || []);
+  const missingMarketId = state.routeMarketId || state.selectedMarketId || "";
 
   if (!market) {
-    els.settlementConsole.innerHTML = `<div class="empty-state">Select a market to prepare settlement.</div>`;
+    els.wagerPageTitle.textContent = "Wager";
+    els.wagerPageChartTitle.textContent = "Decimal Odds";
+    els.wagerHistoryCount.textContent = "0";
+    els.wagerGroupCode.textContent = "MARKET";
+    els.wagerPageSummary.innerHTML = `<div class="empty-state">${missingMarketId ? "Wager not loaded for the selected fixture." : "No wager selected."}</div>`;
+    els.wagerPageChart.innerHTML = `<div class="empty-state">No chart is available.</div>`;
+    els.wagerPageHistory.innerHTML = `<div class="empty-state">No price ticks are available.</div>`;
+    els.wagerPageRelated.innerHTML = `<div class="empty-state">No related outcomes are available.</div>`;
+    els.wagerPageExchange.innerHTML = `<div class="empty-state">No exchange book is available.</div>`;
     return;
   }
 
+  els.wagerPageTitle.textContent = market.selection;
+  els.wagerPageChartTitle.textContent = `${market.groupLabel || "Market"} / ${market.periodLabel || "Full Match"}`;
+  els.wagerHistoryCount.textContent = String(history.length);
+  els.wagerGroupCode.textContent = market.marketCode || "MARKET";
+  els.wagerPageSummary.innerHTML = renderWagerSummary(market, history);
+  els.wagerPageChart.innerHTML = history.length
+    ? renderPriceChartSvg(history, { width: 980, height: 380, pad: 38, labelSize: 13 })
+    : `<div class="empty-state">Awaiting TxODDS price history for this wager.</div>`;
+  els.wagerPageHistory.innerHTML = renderWagerHistoryTable(history);
+  els.wagerPageRelated.innerHTML = renderRelatedMarkets(market);
+  els.wagerPageExchange.innerHTML = renderWagerExchangeSnapshot(market);
+}
+
+function renderWagerSummary(market = {}, history = []) {
+  const stats = priceHistoryStats(history);
+  const price = Number(market.currentOddsDecimal || stats.latest?.decimal || 0);
+  const probability = Number(market.impliedProbability || stats.latest?.impliedProbability || 0);
+  const latestTs = stats.latest?.ts || market.priceTs || "";
+  const rawSport = String(state.match?.sport || "").trim();
+  const eyebrow = rawSport && rawSport !== "Unknown"
+    ? rawSport
+    : state.match?.competition || "TxODDS";
+  const liveClass = isRecentLiveMarket(market.id) ? "positive" : "muted";
+  const liveLabel = isRecentLiveMarket(market.id) ? "Live tick" : market.status || "open";
+
+  return `
+    <div class="wager-title-strip">
+      <div>
+        <span class="eyebrow">${escapeHtml(eyebrow)}</span>
+        <strong>${escapeHtml(marketContextLabel(market))}</strong>
+      </div>
+      <span class="badge ${escapeHtml(liveClass)}">${escapeHtml(liveLabel)}</span>
+    </div>
+    <div class="metric-grid wager-stat-grid">
+      <div class="metric"><span>Price</span><strong>${preciseOdds(price)}</strong></div>
+      <div class="metric"><span>Implied</span><strong>${pct(probability)}</strong></div>
+      <div class="metric"><span>Session Move</span><strong class="${valueClass(stats.delta)}">${signedDecimal(stats.delta)}</strong></div>
+      <div class="metric"><span>Last Tick</span><strong class="${valueClass(stats.lastDelta)}">${signedDecimal(stats.lastDelta)}</strong></div>
+      <div class="metric"><span>High</span><strong>${preciseOdds(stats.max)}</strong></div>
+      <div class="metric"><span>Low</span><strong>${preciseOdds(stats.min)}</strong></div>
+      <div class="metric"><span>Ticks</span><strong>${stats.count}</strong></div>
+      <div class="metric"><span>Updated</span><strong>${escapeHtml(timeLabel(latestTs))}</strong></div>
+    </div>
+  `;
+}
+
+function renderWagerHistoryTable(history = []) {
+  const sorted = sortedPriceHistory(history);
+  const rows = sorted.map((point, index) => ({
+    point,
+    previous: index > 0 ? sorted[index - 1] : null
+  })).slice(-30).reverse();
+
+  if (!rows.length) return `<div class="empty-state">No price ticks are available.</div>`;
+
+  return `
+    <div class="history-table">
+      <div class="history-row history-head">
+        <span>Time</span>
+        <span>Price</span>
+        <span>Implied</span>
+        <span>Move</span>
+      </div>
+      ${rows.map(({ point, previous }) => {
+        const delta = previous ? Number(point.decimal) - Number(previous.decimal) : 0;
+
+        return `
+          <div class="history-row">
+            <span>${escapeHtml(timeLabel(point.ts))}</span>
+            <strong>${preciseOdds(point.decimal)}</strong>
+            <span>${pct(point.impliedProbability)}</span>
+            <strong class="${valueClass(delta)}">${signedDecimal(delta)}</strong>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderRelatedMarkets(market = {}) {
+  const siblings = relatedMarkets(market);
+
+  if (!siblings.length) return `<div class="empty-state">No related outcomes are available.</div>`;
+
+  return siblings.map((item) => {
+    const history = state.oddsHistory.get(item.id) || [];
+    const stats = priceHistoryStats(history);
+
+    return `
+      <button class="related-market" type="button" data-related-market-id="${escapeHtml(item.id)}">
+        <span>
+          <strong>${escapeHtml(item.selection)}</strong>
+          <small>${escapeHtml(item.periodLabel || "Full Match")} / ${escapeHtml(item.marketCode || item.type)}</small>
+        </span>
+        <span>
+          <strong>${preciseOdds(item.currentOddsDecimal)}</strong>
+          <small class="${valueClass(stats.delta)}">${signedDecimal(stats.delta)}</small>
+        </span>
+      </button>
+    `;
+  }).join("");
+}
+
+function renderWagerExchangeSnapshot(market = {}) {
+  const book = state.exchangeOrderBook?.marketId === market.id
+    ? state.exchangeOrderBook
+    : { back: [], lay: [], trades: [] };
+  const receiptStatus = state.receipts.has(market.id) ? "Proof Ready" : "Proof";
+
+  return `
+    <div class="wager-exchange-actions">
+      <button class="terminal-button primary" type="button" data-wager-action="trade">Open Trade Ticket</button>
+      <button class="terminal-button" type="button" data-wager-action="proof">${escapeHtml(receiptStatus)}</button>
+    </div>
+    <div class="exchange-book">
+      <section>
+        <h3>Back Book</h3>
+        ${renderBookLevels(book.back, "back")}
+      </section>
+      <section>
+        <h3>Lay Book</h3>
+        ${renderBookLevels(book.lay, "lay")}
+      </section>
+    </div>
+    <section class="exchange-section">
+      <h3>Matched Trades</h3>
+      ${renderTradeRows(book.trades || [])}
+    </section>
+  `;
+}
+
+async function hydrateExchange() {
+  await hydrateExchangePortfolio();
+  await hydrateMarketOrderBook();
+}
+
+async function hydrateExchangePortfolio() {
+  const response = await fetch(`/api/exchange/user/${encodeURIComponent(state.exchangeUserId)}`);
+
+  if (response.ok) {
+    state.exchangePortfolio = await response.json();
+  }
+}
+
+async function hydrateMarketOrderBook(marketId = state.selectedMarketId) {
+  if (!marketId) return;
+
+  const response = await fetch(`/api/exchange/book/${encodeURIComponent(marketId)}`);
+
+  if (response.ok) {
+    state.exchangeOrderBook = await response.json();
+    renderSettlement();
+    renderWagerPage();
+  }
+}
+
+function selectedMarket() {
+  return state.markets.get(state.selectedMarketId);
+}
+
+function setExchangeTicketDefaults(market = selectedMarket()) {
+  if (!market) return;
+  if (state.exchangeTicket.marketId === market.id && Number(state.exchangeTicket.odds) > 0) return;
+
+  state.exchangeTicket = {
+    ...state.exchangeTicket,
+    marketId: market.id,
+    odds: Number(market.currentOddsDecimal || state.exchangeTicket.odds || 2),
+    stake: Number(state.exchangeTicket.stake || 25)
+  };
+}
+
+function openExchangeTicket() {
+  const market = selectedMarket();
+
+  if (!market) return;
+
+  setExchangeTicketDefaults(market);
+  state.tradeTicketOpen = true;
+  state.exchangeNotice = "";
+  renderAll();
+  hydrateExchange();
+}
+
+function openExchangeTicketFromWagerPage() {
+  const market = selectedMarket();
+
+  if (!market) return;
+
+  openExchangeTicket();
+}
+
+function closeTradeTicket() {
+  state.tradeTicketOpen = false;
+  renderTradeTicketOverlay();
+}
+
+async function switchExchangeUser(userId = "trader-a") {
+  state.exchangeUserId = userId;
+  state.exchangeNotice = `Switched to ${userId === "trader-a" ? "Trader A" : "Trader B"}.`;
+  await hydrateExchangePortfolio();
+  renderAll();
+}
+
+function tradeExposure(side = "back", oddsValue = 0, stakeValue = 0) {
+  const price = Number(oddsValue);
+  const stake = Number(stakeValue);
+
+  if (!Number.isFinite(price) || !Number.isFinite(stake)) return 0;
+  return side === "lay" ? stake * Math.max(price - 1, 0) : stake;
+}
+
+async function placeExchangeOrder() {
+  const market = selectedMarket();
+  const oddsInput = qs("#exchangeOdds");
+  const stakeInput = qs("#exchangeStake");
+  const oddsValue = Number(oddsInput?.value || state.exchangeTicket.odds);
+  const stakeValue = Number(stakeInput?.value || state.exchangeTicket.stake);
+  let payload = null;
+
+  if (!market || state.exchangeBusy) return;
+
+  state.exchangeBusy = true;
+  state.exchangeTicket = {
+    ...state.exchangeTicket,
+    marketId: market.id,
+    odds: oddsValue,
+    stake: stakeValue
+  };
+  renderTradeTicketOverlay();
+
+  try {
+    const response = await fetch("/api/exchange/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId: state.exchangeUserId,
+        marketId: market.id,
+        outcome: market.selection,
+        side: state.exchangeTicket.side,
+        odds: oddsValue,
+        stake: stakeValue
+      })
+    });
+
+    payload = await response.json();
+
+    if (!response.ok) {
+      state.exchangeNotice = payload.message || payload.error || "Order rejected.";
+      return;
+    }
+
+    state.exchangePortfolio = payload.portfolio;
+    state.exchangeOrderBook = payload.orderBook;
+    state.exchangeNotice = payload.trades?.length
+      ? `Matched ${payload.trades.length} trade${payload.trades.length === 1 ? "" : "s"} on ${market.selection}.`
+      : `${state.exchangeTicket.side === "back" ? "Back" : "Lay"} order posted for ${market.selection}.`;
+  } finally {
+    state.exchangeBusy = false;
+    renderAll();
+  }
+}
+
+async function settleExchangeMarket() {
+  const market = state.markets.get(state.selectedMarketId);
+  let payload = null;
+
+  if (!market || state.exchangeBusy) return;
+
+  state.exchangeBusy = true;
+  renderTradeTicketOverlay();
+
+  try {
+    const response = await fetch("/api/exchange/settle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        marketId: market.id,
+        winningOutcome: market.selection,
+        txlinePayload: {
+          fixtureId: market.fixtureId,
+          market: market.groupLabel,
+          outcome: market.selection,
+          source: "TxODDS selected outcome",
+          settledAt: new Date().toISOString()
+        }
+      })
+    });
+
+    payload = await response.json();
+
+    if (!response.ok) {
+      state.exchangeNotice = payload.message || payload.error || "Settlement failed.";
+      return;
+    }
+
+    state.exchangeOrderBook = payload.orderBook;
+    await hydrateExchangePortfolio();
+    state.exchangeNotice = `Settled ${market.selection}. Payouts: ${payload.settlement.payouts.length}. Rake: ${usdc(payload.settlement.rake)}.`;
+  } finally {
+    state.exchangeBusy = false;
+    renderAll();
+  }
+}
+
+function renderBookLevels(levels = [], side = "back") {
+  if (!levels.length) {
+    return `<div class="book-empty">No ${side} orders</div>`;
+  }
+
+  return levels.slice(0, 5).map((level) => `
+    <div class="book-level">
+      <span>${escapeHtml(level.outcome)}</span>
+      <strong>${preciseOdds(level.odds)}</strong>
+      <span>${usdc(level.totalStake)}</span>
+    </div>
+  `).join("");
+}
+
+function renderOpenOrders(orders = []) {
+  if (!orders.length) return `<div class="book-empty">No open orders for this trader.</div>`;
+
+  return orders.slice(0, 4).map((order) => `
+    <div class="exchange-order">
+      <span class="${order.side === "back" ? "positive" : "negative"}">${escapeHtml(order.side)}</span>
+      <strong>${escapeHtml(order.outcome)} @ ${preciseOdds(order.odds)}</strong>
+      <span>${usdc(order.unmatched)} open</span>
+    </div>
+  `).join("");
+}
+
+function renderTradeRows(trades = []) {
+  if (!trades.length) return `<div class="book-empty">No matched trades yet.</div>`;
+
+  return trades.slice(-4).reverse().map((trade) => `
+    <div class="exchange-order">
+      <span>${escapeHtml(trade.status)}</span>
+      <strong>${escapeHtml(trade.outcome)} @ ${preciseOdds(trade.odds)}</strong>
+      <span>${usdc(trade.stake)}</span>
+    </div>
+  `).join("");
+}
+
+function bindExchangeControls() {
+  qs("#traderA")?.addEventListener("click", () => switchExchangeUser("trader-a"));
+  qs("#traderB")?.addEventListener("click", () => switchExchangeUser("trader-b"));
+  qs("#exchangeBack")?.addEventListener("click", () => {
+    state.exchangeTicket.side = "back";
+    renderTradeTicketOverlay();
+  });
+  qs("#exchangeLay")?.addEventListener("click", () => {
+    state.exchangeTicket.side = "lay";
+    renderTradeTicketOverlay();
+  });
+  qs("#exchangeStake")?.addEventListener("input", (event) => {
+    state.exchangeTicket.stake = Number(event.target.value || 0);
+  });
+  qs("#exchangeOdds")?.addEventListener("input", (event) => {
+    state.exchangeTicket.odds = Number(event.target.value || 0);
+  });
+  qs("#placeExchangeOrder")?.addEventListener("click", placeExchangeOrder);
+  qs("#settleExchangeMarket")?.addEventListener("click", settleExchangeMarket);
+}
+
+function renderSettlement() {
+  const market = selectedMarket();
+
+  if (!market) {
+    els.settlementConsole.innerHTML = `<div class="empty-state">Select an open outcome to trade against another simulated user.</div>`;
+    return;
+  }
+
+  setExchangeTicketDefaults(market);
+
+  const portfolio = state.exchangePortfolio;
+  const user = portfolio?.user;
+  const book = state.exchangeOrderBook?.marketId === market.id ? state.exchangeOrderBook : { back: [], lay: [], trades: [] };
+  const accountLabel = state.exchangeUserId === "trader-a" ? "Trader A" : "Trader B";
+
   els.settlementConsole.innerHTML = `
-    <div class="settlement-row"><span>Selected</span><strong>${escapeHtml(market.id)}</strong></div>
-    <div class="settlement-row"><span>Escrow asset</span><strong>Devnet USDC</strong></div>
-    <div class="settlement-row"><span>Validation</span><strong class="${receipt ? "positive" : "muted"}">${receipt ? "TxLINE proof ready" : "Awaiting receipt"}</strong></div>
-    <div class="settlement-row"><span>Wallet</span><strong>${escapeHtml(state.wallet ? short(state.wallet, 9) : "Not connected")}</strong></div>
-    ${settlement ? `
-      <div class="settlement-row"><span>Status</span><strong class="positive">${escapeHtml(settlement.status)}</strong></div>
-      <div class="settlement-row"><span>Tx</span><a href="${escapeHtml(settlement.explorerUrl)}" target="_blank" rel="noreferrer">${escapeHtml(short(settlement.txSignature, 8))}</a></div>
-    ` : ""}
-    <div class="settlement-actions">
-      <button class="terminal-button" type="button" id="openProofBtn">Proof</button>
-      <button class="terminal-button" type="button" id="settleBtn">Settle</button>
+    <div class="exchange-account-row">
+      <div>
+        <span class="eyebrow">Active trader</span>
+        <strong>${escapeHtml(accountLabel)}</strong>
+      </div>
+      <div class="account-switch">
+        <button class="terminal-button ${state.exchangeUserId === "trader-a" ? "active" : ""}" type="button" id="compactTraderA">Trader A</button>
+        <button class="terminal-button ${state.exchangeUserId === "trader-b" ? "active" : ""}" type="button" id="compactTraderB">Trader B</button>
+      </div>
+    </div>
+    <div class="metric-grid exchange-metrics">
+      <div class="metric"><span>Balance</span><strong>${escapeHtml(user ? usdc(user.balance) : "--")}</strong></div>
+      <div class="metric"><span>P&L</span><strong class="${Number(user?.pnl || 0) >= 0 ? "positive" : "negative"}">${escapeHtml(user ? usdc(user.pnl) : "--")}</strong></div>
+    </div>
+    <div class="settlement-row"><span>Outcome</span><strong>${escapeHtml(market.selection)}</strong></div>
+    <div class="settlement-row"><span>Reference price</span><strong>${preciseOdds(market.currentOddsDecimal)}</strong></div>
+    <div class="compact-trade-actions">
+      <button class="terminal-button primary" type="button" id="openTradeTicketPanel">Open Trade Ticket</button>
+      <button class="terminal-button" type="button" id="openSelectedWagerChart">Chart</button>
+    </div>
+    ${state.exchangeNotice ? `<div class="exchange-notice">${escapeHtml(state.exchangeNotice)}</div>` : ""}
+    <div class="exchange-book">
+      <section>
+        <h3>Back Book</h3>
+        ${renderBookLevels(book.back, "back")}
+      </section>
+      <section>
+        <h3>Lay Book</h3>
+        ${renderBookLevels(book.lay, "lay")}
+      </section>
+    </div>
+    <section class="exchange-section">
+      <h3>${escapeHtml(accountLabel)} Open Orders</h3>
+      ${renderOpenOrders((portfolio?.openOrders || []).filter((order) => order.marketId === market.id))}
+    </section>
+    <section class="exchange-section">
+      <h3>Matched Trades</h3>
+      ${renderTradeRows(book.trades || [])}
+    </section>
+  `;
+
+  qs("#openTradeTicketPanel")?.addEventListener("click", openExchangeTicket);
+  qs("#openSelectedWagerChart")?.addEventListener("click", () => navigateToWager(market.id));
+  qs("#compactTraderA")?.addEventListener("click", () => switchExchangeUser("trader-a"));
+  qs("#compactTraderB")?.addEventListener("click", () => switchExchangeUser("trader-b"));
+}
+
+function renderTradeTicketOverlay() {
+  const market = selectedMarket();
+
+  if (!state.tradeTicketOpen) {
+    els.tradeTicketOverlay.classList.remove("open");
+    els.tradeTicketOverlay.innerHTML = "";
+    return;
+  }
+
+  els.tradeTicketOverlay.classList.add("open");
+
+  if (!market) {
+    els.tradeTicketOverlay.innerHTML = `
+      <div class="trade-modal" role="dialog" aria-modal="true" aria-labelledby="tradeTicketTitle">
+        <div class="trade-modal-head">
+          <div>
+            <span class="eyebrow">P2P EXCHANGE</span>
+            <h2 id="tradeTicketTitle">Trade Ticket</h2>
+          </div>
+          <button class="terminal-button" type="button" data-close-trade-ticket>Close</button>
+        </div>
+        <div class="empty-state">Select a wager before placing a trade.</div>
+      </div>
+    `;
+    return;
+  }
+
+  setExchangeTicketDefaults(market);
+
+  const history = sortedPriceHistory(state.oddsHistory.get(market.id) || []);
+  const stats = priceHistoryStats(history);
+  const portfolio = state.exchangePortfolio;
+  const user = portfolio?.user;
+  const book = state.exchangeOrderBook?.marketId === market.id ? state.exchangeOrderBook : { back: [], lay: [], trades: [] };
+  const ticket = state.exchangeTicket;
+  const exposure = tradeExposure(ticket.side, ticket.odds, ticket.stake);
+  const accountLabel = state.exchangeUserId === "trader-a" ? "Trader A" : "Trader B";
+  const lastMove = stats.lastDelta;
+
+  els.tradeTicketOverlay.innerHTML = `
+    <div class="trade-modal" role="dialog" aria-modal="true" aria-labelledby="tradeTicketTitle">
+      <div class="trade-modal-head">
+        <div>
+          <span class="eyebrow">P2P EXCHANGE</span>
+          <h2 id="tradeTicketTitle">Trade Ticket</h2>
+        </div>
+        <button class="terminal-button" type="button" data-close-trade-ticket>Close</button>
+      </div>
+
+      <div class="trade-modal-body">
+        <section class="trade-ticket-panel order-panel">
+          <div class="trade-ticket-section-head">
+            <span class="eyebrow">Execution</span>
+            <strong>${escapeHtml(accountLabel)}</strong>
+          </div>
+          <div class="account-switch wide">
+            <button class="terminal-button ${state.exchangeUserId === "trader-a" ? "active" : ""}" type="button" id="traderA">Trader A</button>
+            <button class="terminal-button ${state.exchangeUserId === "trader-b" ? "active" : ""}" type="button" id="traderB">Trader B</button>
+          </div>
+          <div class="metric-grid exchange-metrics">
+            <div class="metric"><span>Balance</span><strong>${escapeHtml(user ? usdc(user.balance) : "--")}</strong></div>
+            <div class="metric"><span>P&L</span><strong class="${Number(user?.pnl || 0) >= 0 ? "positive" : "negative"}">${escapeHtml(user ? usdc(user.pnl) : "--")}</strong></div>
+          </div>
+          <div class="trade-market-summary">
+            <span>${escapeHtml(market.groupLabel || "Market")}</span>
+            <strong>${escapeHtml(market.selection)}</strong>
+            <small>${escapeHtml(state.match?.label || market.fixtureId)} / ${escapeHtml(market.periodLabel || "Full Match")}</small>
+          </div>
+          <div class="side-toggle trade-side-toggle">
+            <button class="terminal-button ${ticket.side === "back" ? "active back" : ""}" type="button" id="exchangeBack">Back</button>
+            <button class="terminal-button ${ticket.side === "lay" ? "active lay" : ""}" type="button" id="exchangeLay">Lay</button>
+          </div>
+          <div class="trade-input-grid">
+            <label>
+              <span>Odds</span>
+              <input id="exchangeOdds" type="number" min="1.01" step="0.001" value="${escapeHtml(ticket.odds)}">
+            </label>
+            <label>
+              <span>Stake</span>
+              <input id="exchangeStake" type="number" min="1" step="1" value="${escapeHtml(ticket.stake)}">
+            </label>
+          </div>
+          <div class="settlement-row"><span>Required escrow</span><strong>${escapeHtml(usdc(exposure))}</strong></div>
+          <button class="terminal-button primary place-order-button" type="button" id="placeExchangeOrder">
+            ${state.exchangeBusy ? "Working" : `${ticket.side === "back" ? "Back" : "Lay"} ${escapeHtml(market.selection)}`}
+          </button>
+          ${state.exchangeNotice ? `<div class="exchange-notice">${escapeHtml(state.exchangeNotice)}</div>` : ""}
+          <button class="terminal-button settle-market-button" type="button" id="settleExchangeMarket">
+            Settle As ${escapeHtml(market.selection)}
+          </button>
+        </section>
+
+        <section class="trade-ticket-panel trade-chart-panel">
+          <div class="trade-ticket-section-head">
+            <span class="eyebrow">Price Context</span>
+            <strong>${preciseOdds(market.currentOddsDecimal)}</strong>
+          </div>
+          <div class="metric-grid trade-stat-grid">
+            <div class="metric"><span>Implied</span><strong>${pct(market.impliedProbability)}</strong></div>
+            <div class="metric"><span>Last Tick</span><strong class="${valueClass(lastMove)}">${signedDecimal(lastMove)}</strong></div>
+            <div class="metric"><span>High</span><strong>${preciseOdds(stats.max)}</strong></div>
+            <div class="metric"><span>Low</span><strong>${preciseOdds(stats.min)}</strong></div>
+          </div>
+          <div class="trade-ticket-chart">
+            ${history.length ? renderPriceChartSvg(history, { width: 720, height: 300, pad: 28, labelSize: 11 }) : `<div class="empty-state">Awaiting TxODDS price history for this wager.</div>`}
+          </div>
+        </section>
+
+        <section class="trade-ticket-panel book-panel">
+          <div class="trade-ticket-section-head">
+            <span class="eyebrow">Order Book</span>
+            <strong>5% rake</strong>
+          </div>
+          <div class="exchange-book">
+            <section>
+              <h3>Back Book</h3>
+              ${renderBookLevels(book.back, "back")}
+            </section>
+            <section>
+              <h3>Lay Book</h3>
+              ${renderBookLevels(book.lay, "lay")}
+            </section>
+          </div>
+          <section class="exchange-section">
+            <h3>${escapeHtml(accountLabel)} Open Orders</h3>
+            ${renderOpenOrders((portfolio?.openOrders || []).filter((order) => order.marketId === market.id))}
+          </section>
+          <section class="exchange-section">
+            <h3>Matched Trades</h3>
+            ${renderTradeRows(book.trades || [])}
+          </section>
+        </section>
+      </div>
     </div>
   `;
 
-  qs("#openProofBtn")?.addEventListener("click", () => openReceipt(market.id));
-  qs("#settleBtn")?.addEventListener("click", () => settleMarket(market.id));
-}
-
-function renderCommandHistory() {
-  els.commandHistory.innerHTML = state.commandLog.slice(-6).map((entry) => (
-    `<div class="cmd-${entry.kind}">${entry.kind === "in" ? "SABLE&gt; " : ""}${escapeHtml(entry.text)}</div>`
-  )).join("");
-  els.commandHistory.scrollTop = els.commandHistory.scrollHeight;
+  bindExchangeControls();
 }
 
 function renderReceiptDrawer() {
@@ -1404,135 +2654,9 @@ function buildTxlineReceipt(proof, market) {
   };
 }
 
-async function settleMarket(marketId = state.selectedMarketId) {
-  const market = state.markets.get(marketId);
-  if (!market) {
-    log("out", `Unknown market ${marketId}.`);
-    renderAll();
-    return;
-  }
-  state.selectedMarketId = market.id;
-  if (!state.wallet) {
-    log("out", "Connect a wallet before settlement.");
-    setActivePane("settlement");
-    renderAll();
-    return;
-  }
-
-  await openReceipt(market.id);
-  const receipt = state.receipts.get(market.id);
-  if (!receipt) {
-    log("out", `No TxLINE receipt available for ${market.id}.`);
-    renderAll();
-    return;
-  }
-  const response = await fetch("/api/settlement/simulate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      marketId: market.id,
-      selection: market.selection,
-      amountUsdc: "100.00",
-      userWallet: state.wallet,
-      receiptId: receipt.id
-    })
-  });
-  state.settlement = await response.json();
-  receipt.solana = {
-    cluster: "devnet",
-    txSignature: state.settlement.txSignature,
-    explorerUrl: state.settlement.explorerUrl
-  };
-  state.receipts.set(market.id, receipt);
-  log("out", `Settlement passed via validateStatV2. Tx ${short(state.settlement.txSignature, 8)}.`);
-  setActivePane("settlement");
-  renderAll();
-}
-
-function parseCommand(raw) {
-  const parts = raw.trim().split(/\s+/).filter(Boolean);
-  const verb = (parts.shift() || "HELP").toUpperCase();
-  const args = [];
-  const flags = {};
-  for (const part of parts) {
-    if (part.startsWith("--")) {
-      const [key, value] = part.slice(2).split("=");
-      flags[key] = value || true;
-    } else {
-      args.push(part);
-    }
-  }
-  return { raw, verb, args, flags };
-}
-
-function executeCommand(raw) {
-  if (!raw.trim()) return;
-  const command = parseCommand(raw);
-  log("in", command.raw);
-
-  if (command.verb === "HELP") {
-    log("out", "Commands: MATCH <code>, ODDS <code>, WATCH <code>, STEAM --live, PROOF <market>, SETTLE <market>.");
-    renderAll();
-    return;
-  }
-
-  if (["MATCH", "ODDS", "WATCH"].includes(command.verb)) {
-    const code = command.args[0];
-    if (code) selectFixtureByCode(code);
-    setActivePane(command.verb === "ODDS" ? "odds" : "match");
-    log("out", `${command.verb} focused ${state.match?.label || state.fixtureKey}.`);
-    renderAll();
-    return;
-  }
-
-  if (command.verb === "STEAM") {
-    setActivePane("scanner");
-    log("out", state.alerts.length ? `${state.alerts.length} market movement alerts active.` : "Scanner armed. Waiting for odds displacement.");
-    renderAll();
-    return;
-  }
-
-  if (command.verb === "PROOF") {
-    openReceipt(command.args[0] || state.selectedMarketId);
-    return;
-  }
-
-  if (command.verb === "SETTLE") {
-    settleMarket(command.args[0] || state.selectedMarketId);
-    return;
-  }
-
-  log("out", `Unknown command ${command.verb}. Type HELP.`);
-  renderAll();
-}
-
-function submitCommand() {
-  const raw = els.commandInput.value;
-  els.commandInput.value = "";
-  executeCommand(raw);
-}
-
-function selectFixtureByCode(code) {
-  const normalized = code.toUpperCase().replace("VS", "-");
-  const fixture = state.fixtures.find((item) => {
-    const label = item.metadata.label.toUpperCase().replace(/\s+/g, "");
-    const compact = label.replace("VS", "-");
-    return label.includes(normalized.replace("-", "")) || compact.includes(normalized);
-  });
-  if (!fixture) {
-    log("out", `No fixture matched ${code}.`);
-    return;
-  }
-  if (fixture.id !== state.fixtureKey) {
-    state.fixtureKey = fixture.id;
-    els.fixtureSelect.value = fixture.id;
-    connectStream();
-  }
-}
-
-function log(kind, text) {
-  state.commandLog.push({ kind, text });
-  state.commandLog = state.commandLog.slice(-40);
+function log(kind = "", text = "") {
+  void kind;
+  void text;
 }
 
 init().catch((error) => {

@@ -17,6 +17,10 @@
           </div>
         </div>
         <div class="control-row" aria-label="Terminal controls">
+          <nav class="screen-tabs" aria-label="Sable screens">
+            <button id="dashboardNav" class="terminal-button nav-tab" type="button" data-screen-nav="dashboard">Dashboard</button>
+            <button id="wagerNav" class="terminal-button nav-tab" type="button" data-screen-nav="wager">Wager Chart</button>
+          </nav>
           <label class="select-label">
             <span>Fixture</span>
             <select id="fixtureSelect"></select>
@@ -26,12 +30,12 @@
 
       <section class="status-bar" id="statusBar" aria-live="polite"></section>
 
-      <main class="terminal-grid">
+      <main id="dashboardScreen" class="screen-view terminal-grid" data-screen="dashboard">
         <section class="pane tape-pane" data-pane="tape">
           <div class="pane-header">
             <div>
-              <span class="eyebrow">SCORES SSE</span>
-              <h2>Match Tape</h2>
+              <span class="eyebrow">TXODDS WIRE</span>
+              <h2>Market Wire</h2>
             </div>
             <span class="hotkey">WATCH</span>
           </div>
@@ -81,30 +85,75 @@
         <section class="pane settlement-pane" data-pane="settlement">
           <div class="pane-header">
             <div>
-              <span class="eyebrow">DEVNET</span>
-              <h2>Settlement Console</h2>
+              <span class="eyebrow">P2P EXCHANGE</span>
+              <h2>Trade Console</h2>
             </div>
-            <span class="hotkey">SETTLE</span>
+            <span class="hotkey">5% RAKE</span>
           </div>
           <div id="settlementConsole" class="settlement-console"></div>
         </section>
       </main>
 
-      <footer class="command-console">
-        <div id="commandHistory" class="command-history"></div>
-        <form id="commandForm" class="command-form">
-          <span class="prompt">SABLE&gt;</span>
-          <input
-            id="commandInput"
-            autocomplete="off"
-            spellcheck="false"
-            aria-label="Command input"
-            placeholder="MATCH 18143850 | ODDS | STEAM --live | PROOF <MARKET_ID> | SETTLE <MARKET_ID>"
-          >
-        </form>
-      </footer>
+      <main id="wagerScreen" class="screen-view wager-page" data-screen="wager" hidden>
+        <section class="pane wager-focus-pane">
+          <div class="pane-header">
+            <div>
+              <span class="eyebrow">WAGER CHART</span>
+              <h2 id="wagerPageTitle">Wager</h2>
+            </div>
+            <button id="backToDashboard" class="terminal-button" type="button">Dashboard</button>
+          </div>
+          <div id="wagerPageSummary" class="wager-page-summary"></div>
+        </section>
+
+        <section class="pane wager-chart-pane">
+          <div class="pane-header">
+            <div>
+              <span class="eyebrow">PRICE HISTORY</span>
+              <h2 id="wagerPageChartTitle">Decimal Odds</h2>
+            </div>
+            <button id="wagerTradeShortcut" class="terminal-button" type="button">Trade</button>
+          </div>
+          <div id="wagerPageChart" class="wager-page-chart"></div>
+        </section>
+
+        <section class="pane wager-history-pane">
+          <div class="pane-header">
+            <div>
+              <span class="eyebrow">TICKS</span>
+              <h2>Price Tape</h2>
+            </div>
+            <span id="wagerHistoryCount" class="hotkey">0</span>
+          </div>
+          <div id="wagerPageHistory" class="wager-history-list"></div>
+        </section>
+
+        <section class="pane wager-side-pane">
+          <div class="pane-header">
+            <div>
+              <span class="eyebrow">MARKET SET</span>
+              <h2>Related Outcomes</h2>
+            </div>
+            <span id="wagerGroupCode" class="hotkey">MARKET</span>
+          </div>
+          <div id="wagerPageRelated" class="related-market-list"></div>
+        </section>
+
+        <section class="pane wager-book-pane">
+          <div class="pane-header">
+            <div>
+              <span class="eyebrow">P2P EXCHANGE</span>
+              <h2>Book Snapshot</h2>
+            </div>
+            <span class="hotkey">5% RAKE</span>
+          </div>
+          <div id="wagerPageExchange" class="wager-exchange-snapshot"></div>
+        </section>
+      </main>
+
     </div>
 
+    <aside id="tradeTicketOverlay" class="trade-overlay" aria-label="P2P trade ticket"></aside>
     <aside id="receiptDrawer" class="receipt-drawer" aria-label="Resolution receipt drawer"></aside>
 
     <script type="module" src="/app.js"></script>
