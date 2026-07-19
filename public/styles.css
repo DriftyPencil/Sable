@@ -1127,10 +1127,18 @@ select {
   text-transform: uppercase;
 }
 
-.book-level,
-.exchange-order {
+.book-level {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 7px;
+  border-top: 1px solid rgba(38, 49, 63, 0.62);
+  padding: 6px 0;
+}
+
+.exchange-order {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 7px;
   border-top: 1px solid rgba(38, 49, 63, 0.62);
@@ -1157,6 +1165,14 @@ select {
 .book-empty {
   color: var(--muted);
   padding: 6px 0;
+}
+
+.order-cancel-button {
+  min-height: 24px;
+  padding: 0 7px;
+  color: var(--red);
+  font-size: 10px;
+  text-transform: uppercase;
 }
 
 .settle-market-button {
@@ -1267,6 +1283,15 @@ select {
   min-height: 44px;
   font-size: 15px;
   font-weight: 800;
+}
+
+.trade-help {
+  border: 1px solid rgba(38, 49, 63, 0.78);
+  color: var(--muted);
+  background: rgba(56, 189, 248, 0.045);
+  padding: 8px;
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .trade-input-grid {

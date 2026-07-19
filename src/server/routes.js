@@ -6,6 +6,8 @@ import { handleSettlement } from "./settlement.js";
 import {
   handleExchangeBook,
   handleExchangeBootstrap,
+  handleExchangeCancel,
+  handleExchangeCashOut,
   handleExchangeOrder,
   handleExchangeSettle,
   handleExchangeUser
@@ -117,6 +119,16 @@ export function createRequestHandler(context = {}) {
 
       if (req.method === "POST" && pathname === "/api/exchange/orders") {
         await handleExchangeOrder(req, res);
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/exchange/orders/cancel") {
+        await handleExchangeCancel(req, res);
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/exchange/cashout") {
+        await handleExchangeCashOut(req, res);
         return;
       }
 

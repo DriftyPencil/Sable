@@ -1,10 +1,13 @@
 import { json } from "./http.js";
 import { readRequestBody } from "./utils.js";
 import {
+  cancelOrder,
+  cashOutPosition,
   getMarketOrderBook,
   getOrderBook,
   getOrCreateUser,
   getUserPortfolio,
+  placeMarketOrder,
   placeOrder,
   settleMarket
 } from "./market-store.js";
@@ -33,13 +36,41 @@ export async function handleExchangeBook(res, pathname = "") {
 
 export async function handleExchangeOrder(req, res) {
   const body = await readRequestBody(req);
-  const result = placeOrder({
+  const orderType = String(body.orderType || "limit").toLowerCase();
+  const input = {
     userId: body.userId || "trader-a",
     marketId: body.marketId,
     outcome: body.outcome,
     side: body.side,
     odds: body.odds,
     stake: body.stake
+  };
+  const result = orderType === "market" ? placeMarketOrder(input) : placeOrder(input);
+
+  json(res, 200, {
+    ...result,
+    portfolio: getUserPortfolio(result.order.userId),
+    orderBook: getMarketOrderBook(result.order.marketId)
+  });
+}
+
+export async function handleExchangeCancel(req, res) {
+  const body = await readRequestBody(req);
+  const result = cancelOrder(body.orderId, body.userId || "trader-a");
+
+  json(res, 200, {
+    ...result,
+    portfolio: getUserPortfolio(result.order.userId),
+    orderBook: getMarketOrderBook(result.order.marketId)
+  });
+}
+
+export async function handleExchangeCashOut(req, res) {
+  const body = await readRequestBody(req);
+  const result = cashOutPosition({
+    userId: body.userId || "trader-a",
+    marketId: body.marketId,
+    outcome: body.outcome
   });
 
   json(res, 200, {

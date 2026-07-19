@@ -27,6 +27,7 @@ const state = {
   exchangeOrderBook: null,
   exchangeTicket: {
     marketId: "",
+    orderType: "limit",
     side: "back",
     stake: 25,
     odds: 2
@@ -2086,6 +2087,7 @@ function setExchangeTicketDefaults(market = selectedMarket()) {
   state.exchangeTicket = {
     ...state.exchangeTicket,
     marketId: market.id,
+    orderType: state.exchangeTicket.orderType || "limit",
     odds: Number(market.currentOddsDecimal || state.exchangeTicket.odds || 2),
     stake: Number(state.exchangeTicket.stake || 25)
   };
@@ -2137,6 +2139,7 @@ async function placeExchangeOrder() {
   const stakeInput = qs("#exchangeStake");
   const oddsValue = Number(oddsInput?.value || state.exchangeTicket.odds);
   const stakeValue = Number(stakeInput?.value || state.exchangeTicket.stake);
+  const orderType = state.exchangeTicket.orderType || "limit";
   let payload = null;
 
   if (!market || state.exchangeBusy) return;
@@ -2145,6 +2148,7 @@ async function placeExchangeOrder() {
   state.exchangeTicket = {
     ...state.exchangeTicket,
     marketId: market.id,
+    orderType,
     odds: oddsValue,
     stake: stakeValue
   };
@@ -2159,6 +2163,7 @@ async function placeExchangeOrder() {
         marketId: market.id,
         outcome: market.selection,
         side: state.exchangeTicket.side,
+        orderType,
         odds: oddsValue,
         stake: stakeValue
       })
@@ -2175,7 +2180,82 @@ async function placeExchangeOrder() {
     state.exchangeOrderBook = payload.orderBook;
     state.exchangeNotice = payload.trades?.length
       ? `Matched ${payload.trades.length} trade${payload.trades.length === 1 ? "" : "s"} on ${market.selection}.`
-      : `${state.exchangeTicket.side === "back" ? "Back" : "Lay"} order posted for ${market.selection}.`;
+      : orderType === "market"
+        ? `No liquidity crossed for ${market.selection}.`
+        : `${state.exchangeTicket.side === "back" ? "Back" : "Lay"} limit order posted for ${market.selection}.`;
+  } finally {
+    state.exchangeBusy = false;
+    renderAll();
+  }
+}
+
+async function cancelExchangeOrder(orderId = "") {
+  const market = selectedMarket();
+  let payload = null;
+
+  if (!orderId || !market || state.exchangeBusy) return;
+
+  state.exchangeBusy = true;
+  renderTradeTicketOverlay();
+
+  try {
+    const response = await fetch("/api/exchange/orders/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId: state.exchangeUserId,
+        orderId
+      })
+    });
+
+    payload = await response.json();
+
+    if (!response.ok) {
+      state.exchangeNotice = payload.message || payload.error || "Cancel failed.";
+      return;
+    }
+
+    state.exchangePortfolio = payload.portfolio;
+    state.exchangeOrderBook = payload.orderBook;
+    state.exchangeNotice = `Cancelled unmatched order size. Refunded ${usdc(payload.refund)}.`;
+  } finally {
+    state.exchangeBusy = false;
+    renderAll();
+  }
+}
+
+async function cashOutExchangePosition() {
+  const market = selectedMarket();
+  let payload = null;
+
+  if (!market || state.exchangeBusy) return;
+
+  state.exchangeBusy = true;
+  renderTradeTicketOverlay();
+
+  try {
+    const response = await fetch("/api/exchange/cashout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId: state.exchangeUserId,
+        marketId: market.id,
+        outcome: market.selection
+      })
+    });
+
+    payload = await response.json();
+
+    if (!response.ok) {
+      state.exchangeNotice = payload.message || payload.error || "Cash out failed.";
+      return;
+    }
+
+    state.exchangePortfolio = payload.portfolio;
+    state.exchangeOrderBook = payload.orderBook;
+    state.exchangeNotice = payload.trades?.length
+      ? `Cash out crossed ${payload.trades.length} trade${payload.trades.length === 1 ? "" : "s"} via ${payload.cashOut.closeSide}.`
+      : "No cash-out liquidity crossed.";
   } finally {
     state.exchangeBusy = false;
     renderAll();
@@ -2244,8 +2324,9 @@ function renderOpenOrders(orders = []) {
   return orders.slice(0, 4).map((order) => `
     <div class="exchange-order">
       <span class="${order.side === "back" ? "positive" : "negative"}">${escapeHtml(order.side)}</span>
-      <strong>${escapeHtml(order.outcome)} @ ${preciseOdds(order.odds)}</strong>
+      <strong>${escapeHtml(order.outcome)} @ ${order.orderType === "market" ? "MARKET" : preciseOdds(order.odds)}</strong>
       <span>${usdc(order.unmatched)} open</span>
+      <button class="terminal-button order-cancel-button" type="button" data-cancel-order-id="${escapeHtml(order.id)}">Cancel</button>
     </div>
   `).join("");
 }
@@ -2262,6 +2343,12 @@ function renderTradeRows(trades = []) {
   `).join("");
 }
 
+function bindCancelOrderButtons() {
+  document.querySelectorAll("[data-cancel-order-id]").forEach((button) => {
+    button.addEventListener("click", () => cancelExchangeOrder(button.dataset.cancelOrderId));
+  });
+}
+
 function bindExchangeControls() {
   qs("#traderA")?.addEventListener("click", () => switchExchangeUser("trader-a"));
   qs("#traderB")?.addEventListener("click", () => switchExchangeUser("trader-b"));
@@ -2273,6 +2360,14 @@ function bindExchangeControls() {
     state.exchangeTicket.side = "lay";
     renderTradeTicketOverlay();
   });
+  qs("#exchangeLimit")?.addEventListener("click", () => {
+    state.exchangeTicket.orderType = "limit";
+    renderTradeTicketOverlay();
+  });
+  qs("#exchangeMarket")?.addEventListener("click", () => {
+    state.exchangeTicket.orderType = "market";
+    renderTradeTicketOverlay();
+  });
   qs("#exchangeStake")?.addEventListener("input", (event) => {
     state.exchangeTicket.stake = Number(event.target.value || 0);
   });
@@ -2280,7 +2375,9 @@ function bindExchangeControls() {
     state.exchangeTicket.odds = Number(event.target.value || 0);
   });
   qs("#placeExchangeOrder")?.addEventListener("click", placeExchangeOrder);
+  qs("#cashOutExchangePosition")?.addEventListener("click", cashOutExchangePosition);
   qs("#settleExchangeMarket")?.addEventListener("click", settleExchangeMarket);
+  bindCancelOrderButtons();
 }
 
 function renderSettlement() {
@@ -2344,6 +2441,7 @@ function renderSettlement() {
   qs("#openSelectedWagerChart")?.addEventListener("click", () => navigateToWager(market.id));
   qs("#compactTraderA")?.addEventListener("click", () => switchExchangeUser("trader-a"));
   qs("#compactTraderB")?.addEventListener("click", () => switchExchangeUser("trader-b"));
+  bindCancelOrderButtons();
 }
 
 function renderTradeTicketOverlay() {
@@ -2381,9 +2479,14 @@ function renderTradeTicketOverlay() {
   const user = portfolio?.user;
   const book = state.exchangeOrderBook?.marketId === market.id ? state.exchangeOrderBook : { back: [], lay: [], trades: [] };
   const ticket = state.exchangeTicket;
+  const orderType = ticket.orderType || "limit";
   const exposure = tradeExposure(ticket.side, ticket.odds, ticket.stake);
   const accountLabel = state.exchangeUserId === "trader-a" ? "Trader A" : "Trader B";
   const lastMove = stats.lastDelta;
+  const placeVerb = orderType === "market" ? "Market" : ticket.side === "back" ? "Back" : "Lay";
+  const orderTypeHelp = orderType === "market"
+    ? "Crosses the best available opposite-side liquidity immediately. Unfilled size does not rest."
+    : "Posts at your selected odds and rests unmatched size in the open order book.";
 
   els.tradeTicketOverlay.innerHTML = `
     <div class="trade-modal" role="dialog" aria-modal="true" aria-labelledby="tradeTicketTitle">
@@ -2415,6 +2518,11 @@ function renderTradeTicketOverlay() {
             <small>${escapeHtml(state.match?.label || market.fixtureId)} / ${escapeHtml(market.periodLabel || "Full Match")}</small>
           </div>
           <div class="side-toggle trade-side-toggle">
+            <button class="terminal-button ${orderType === "limit" ? "active" : ""}" type="button" id="exchangeLimit">Limit</button>
+            <button class="terminal-button ${orderType === "market" ? "active" : ""}" type="button" id="exchangeMarket">Market</button>
+          </div>
+          <div class="trade-help">${escapeHtml(orderTypeHelp)}</div>
+          <div class="side-toggle trade-side-toggle">
             <button class="terminal-button ${ticket.side === "back" ? "active back" : ""}" type="button" id="exchangeBack">Back</button>
             <button class="terminal-button ${ticket.side === "lay" ? "active lay" : ""}" type="button" id="exchangeLay">Lay</button>
           </div>
@@ -2430,9 +2538,12 @@ function renderTradeTicketOverlay() {
           </div>
           <div class="settlement-row"><span>Required escrow</span><strong>${escapeHtml(usdc(exposure))}</strong></div>
           <button class="terminal-button primary place-order-button" type="button" id="placeExchangeOrder">
-            ${state.exchangeBusy ? "Working" : `${ticket.side === "back" ? "Back" : "Lay"} ${escapeHtml(market.selection)}`}
+            ${state.exchangeBusy ? "Working" : `${placeVerb} ${escapeHtml(market.selection)}`}
           </button>
           ${state.exchangeNotice ? `<div class="exchange-notice">${escapeHtml(state.exchangeNotice)}</div>` : ""}
+          <button class="terminal-button" type="button" id="cashOutExchangePosition">
+            Cash Out Position
+          </button>
           <button class="terminal-button settle-market-button" type="button" id="settleExchangeMarket">
             Settle As ${escapeHtml(market.selection)}
           </button>
